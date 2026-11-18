@@ -290,8 +290,17 @@ function requestCloseTab(tab) {
     if (r === 2) return false;
     if (r === 0) { tab.wc.send('menu', 'save-and-close'); return 'pending'; }
   }
+  keepWindowOpen(host, tab);
   destroyTab(tab);
   return true;
+}
+
+/** 最後のタブを閉じても、ウィンドウ（アプリ）は終わらせず空のタブを残す。
+ *  ウィンドウの × で閉じているときと、もともと空のタブを閉じたときは、これまでどおりウィンドウを閉じる */
+function keepWindowOpen(host, tab) {
+  // ready 前（まだ表示されていない）のウィンドウにタブは足せないので、これまでどおり閉じる
+  if (host.closing || tab.empty || host.win.isDestroyed() || !host.ready) return;
+  if (host.tabs.length === 1 && host.tabs[0] === tab) addTab(host);
 }
 
 /** タブをウィンドウから外す（閉じるとき・別のウィンドウへ移すとき） */
@@ -602,6 +611,7 @@ ipcMain.on('close-window', (e) => {
   const host = entry.host;
   const closing = host.closing;
   entry.forceClose = true;
+  keepWindowOpen(host, entry);
   destroyTab(entry);
   if (closing && host.tabs.length && !host.win.isDestroyed()) host.win.close();
 });
@@ -754,6 +764,12 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     if (arg.do === 'move-window' && t) { moveTabToNewWindow(t); return true; }
     if (arg.do === 'eval-any' && any) return any.wc.executeJavaScript(arg.js);
     if (arg.do === 'close-any' && any) { destroyTab(any); return true; }
+    if (arg.do === 'request-close-any' && any) {
+      // タブの × と同じ閉じ方。閉じたあとのそのウィンドウの様子を返す
+      const h = any.host;
+      requestCloseTab(any);
+      return { windowOpen: !h.win.isDestroyed() && !h.forceClose, tabs: h.tabs.map((x) => ({ id: x.id, empty: x.empty })) };
+    }
     if (arg.do === 'front-any' && any) {
       // 元のウィンドウと重ならない位置に動かして前に出す
       const b = entry.host.win.getBounds();
@@ -818,7 +834,22 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     const m = app.getAppMetrics();
     return { self: e.sender.getOSProcessId(), total: mb(m.reduce((s, x) => s + x.memory.workingSetSize, 0)), byType: Object.fromEntries(m.map((x) => [x.type + '-' + x.pid, mb(x.memory.workingSetSize)])) };
   }
-  if (cmd === 'done') { entry.forceClose = true; setTimeout(() => app.exit(arg ? 1 : 0), 200); return true; }
+  if (cmd === 'done') {
+    let code = arg ? 1 : 0;
+    // 最後に、このウィンドウで最後のタブを閉じても空のタブが残る（アプリが終わらない）ことを確かめる
+    const host = entry.host;
+    if (!PERFTEST && host.ready && host.tabs.length === 1 && !entry.empty) {
+      entry.dirty = false;
+      requestCloseTab(entry);
+      const ok = !host.win.isDestroyed() && !host.forceClose && host.tabs.length === 1 && host.tabs[0] !== entry && host.tabs[0].empty;
+      const line = `${ok ? '✅' : '❌'} 最後のタブを閉じても空のタブが残りアプリは終わらない (タブ ${host.tabs.length})`;
+      process.stdout.write(line + '\n');
+      if (!ok) code = 1;
+    }
+    host.forceClose = true;
+    setTimeout(() => app.exit(code), 200);
+    return true;
+  }
   return null;
 });
 ipcMain.handle('open-external', async (e, url) => {
@@ -830,6 +861,18 @@ ipcMain.handle('message-box', async (e, opts) => {
   return r.response;
 });
 
+/** テキストファイルを読む。文字コードを判定する（BOM 付き UTF-16 / UTF-8 / それ以外は Shift_JIS） */
+function readText(filePath) {
+  const buf = fs.readFileSync(filePath);
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(buf);
+  } catch {
+    return new TextDecoder('shift_jis').decode(buf);
+  }
+}
+
 // 文書ファイル（Word / テキスト / HTML）→ PDF 変換（Chromium の印刷機能を使用）
 ipcMain.handle('convert-to-pdf', async (e, filePath) => {
   const ext = path.extname(filePath).toLowerCase();
@@ -839,9 +882,9 @@ ipcMain.handle('convert-to-pdf', async (e, filePath) => {
     const r = await mammoth.convertToHtml({ path: filePath });
     html = r.value;
   } else if (ext === '.html' || ext === '.htm') {
-    html = fs.readFileSync(filePath, 'utf8');
+    html = readText(filePath);
   } else {
-    const t = fs.readFileSync(filePath, 'utf8');
+    const t = readText(filePath);
     html = '<pre>' + t.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
   }
   const full = `<!doctype html><html><head><meta charset="utf-8"><style>

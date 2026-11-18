@@ -11,10 +11,12 @@ import { selectedPages } from './panels.js';
 import { isTiff, addTiffPages, lastStats as tiffStats } from './tiff.js';
 import { scanInfo, scanAvailable, renderScan, drawScan } from './scanpages.js';
 import { t } from './i18n.js';
+import { sniffKind, embedImage } from './sources.js';
+export { sniffKind } from './sources.js';
 
 const { PDFDocument, rgb, degrees } = PL;
 const PDF_FILTER = [{ name: 'PDF / TIFF', extensions: ['pdf', 'tif', 'tiff'] }, { name: 'PDF', extensions: ['pdf'] }, { name: 'TIFF 画像', extensions: ['tif', 'tiff'] }];
-const SOURCE_EXT = ['pdf', 'png', 'jpg', 'jpeg', 'tif', 'tiff'];
+const SOURCE_EXT = ['pdf', 'png', 'jpg', 'jpeg', 'tif', 'tiff', 'gif', 'bmp', 'webp'];
 
 export async function askPassword(message) {
   const r = await ask({ title: 'パスワード', message, fields: [{ key: 'pw', label: 'パスワード', type: 'password' }] });
@@ -146,59 +148,68 @@ export async function newBlank() {
 
 // ---------------------------------------------------------------- 作成・結合
 
-export async function sourcesToPdf(files) {
+// ファイルから作成で扱う形式。拡張子ではなく中身（先頭のバイト）で見分ける（拡張子と中身が違うファイルがあるため）
+export const CREATE_EXT = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tif', 'tiff', 'docx', 'txt', 'html', 'htm', 'md', 'csv'];
+
+/** ファイルを 1 つの PDF にまとめる。読めなかったファイルは skipped に { name, reason, cancelled } で入れる */
+export async function sourcesToPdf(files, skipped = []) {
   const out = await PDFDocument.create();
   for (const f of files) {
-    const lower = f.name.toLowerCase();
-    let src = null;
-    if (lower.endsWith('.pdf')) {
-      try {
+    const kind = sniffKind(f.name, f.bytes);
+    try {
+      if (!kind) { skipped.push({ name: f.name, reason: t('対応していない形式') }); continue; }
+      let src = null;
+      if (kind === 'pdf') {
         src = (await loadLib(new Uint8Array(f.bytes), askPassword, f.name)).lib;
-      } catch (e) {
-        toast(e.message === 'CANCELLED' ? `${f.name} をスキップしました` : `${f.name} を読み込めませんでした`);
+      } else if (kind === 'png' || kind === 'jpeg' || kind === 'image') {
+        const img = await embedImage(out, kind, f.bytes);
+        const w = img.width * 0.75, h = img.height * 0.75;
+        out.addPage([w, h]).drawImage(img, { x: 0, y: 0, width: w, height: h });
+        continue;
+      } else if (kind === 'tiff') {
+        await addTiffPages(out, f.bytes);
+        continue;
+      } else {
+        src = await PDFDocument.load(await window.api.convertToPdf(f.path));
+      }
+      // 壊れた PDF は読み込めても、ページを写すときに失敗することがある
+      const pages = await out.copyPages(src, src.getPageIndices());
+      pages.forEach((p) => out.addPage(p));
+    } catch (e) {
+      if (e?.message === 'CANCELLED') {
+        skipped.push({ name: f.name, reason: t('パスワードが入力されなかったため処理しませんでした'), cancelled: true });
         continue;
       }
-    } else if (/\.(png|jpe?g)$/.test(lower)) {
-      const img = lower.endsWith('.png') ? await out.embedPng(f.bytes) : await out.embedJpg(f.bytes);
-      const w = img.width * 0.75, h = img.height * 0.75;
-      out.addPage([w, h]).drawImage(img, { x: 0, y: 0, width: w, height: h });
-      continue;
-    } else if (isTiff(lower)) {
-      try {
-        await addTiffPages(out, f.bytes);
-      } catch (e) {
-        toast(`${f.name} を読み込めませんでした: ${e.message}`, 4000);
-      }
-      continue;
-    } else if (/\.(gif|bmp|webp|heic)$/.test(lower)) {
-      // その他の画像はブラウザで PNG に変換
-      const bmp = await createImageBitmap(new Blob([f.bytes]));
-      const c = document.createElement('canvas');
-      c.width = bmp.width; c.height = bmp.height;
-      c.getContext('2d').drawImage(bmp, 0, 0);
-      bmp.close();
-      const img = await out.embedPng(await canvasToBytes(c, 'image/png'));
-      c.width = 0;
-      out.addPage([img.width * 0.75, img.height * 0.75]).drawImage(img, { x: 0, y: 0, width: img.width * 0.75, height: img.height * 0.75 });
-      continue;
-    } else {
-      src = await PDFDocument.load(await window.api.convertToPdf(f.path));
+      skipped.push({ name: f.name, reason: `${t('読み込めませんでした')}: ${e?.message || e}` });
+      window.api.logError('handled', { message: `sources: ${e?.message}`, stack: `sources: ${e?.stack || e}` });
     }
-    const pages = await out.copyPages(src, src.getPageIndices());
-    pages.forEach((p) => out.addPage(p));
   }
   return out;
+}
+
+/** 読めなかったファイルを知らせる */
+async function reportSkipped(skipped) {
+  if (!skipped.length) return;
+  const lines = skipped.slice(0, 10).map((x) => `- ${x.name} — ${x.reason}`);
+  if (skipped.length > 10) lines.push(`… +${skipped.length - 10}`);
+  await alertBox(t('次のファイルは PDF にできませんでした'), lines.join('\n') + '\n\n' + t('対応している形式: PDF・画像（PNG / JPEG / GIF / BMP / WebP / TIFF）・Word（.docx）・テキスト（.txt / .md / .csv / .html）'));
 }
 
 export async function createFromFiles() {
   const files = await window.api.openDialog({
     title: 'PDF にするファイル（複数可・選択順に結合）', multiple: true,
-    filters: [{ name: '対応ファイル', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tif', 'tiff', 'docx', 'txt', 'html', 'htm', 'md', 'csv'] }]
+    filters: [{ name: '対応ファイル', extensions: CREATE_EXT }]
   });
   if (!files.length) return;
+  const skipped = [];
   try {
-    const doc = await sourcesToPdf(files);
-    if (!doc.getPageCount()) return alertBox('PDF を作成できませんでした');
+    const doc = await sourcesToPdf(files, skipped);
+    // 結果を新しいタブで開くと、このタブのお知らせは見えなくなるので、先に知らせる
+    await reportSkipped(skipped);
+    if (!doc.getPageCount()) {
+      if (!skipped.length) await alertBox('PDF を作成できませんでした');
+      return;
+    }
     await openResult(await doc.save(), files.length === 1 ? `${baseName(files[0].name)}.pdf` : '新規PDF.pdf');
   } catch (e) {
     await alertBox('PDF を作成できませんでした', e.message);
@@ -209,9 +220,14 @@ export async function mergeFiles() {
   const files = await window.api.openDialog({ title: '結合するファイル（名前順に結合）', multiple: true, filters: [{ name: 'PDF / 画像', extensions: SOURCE_EXT }] });
   if (!files.length) return;
   files.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+  const skipped = [];
   try {
-    const doc = await sourcesToPdf(files);
-    if (!doc.getPageCount()) return alertBox('結合できるページがありませんでした');
+    const doc = await sourcesToPdf(files, skipped);
+    await reportSkipped(skipped);
+    if (!doc.getPageCount()) {
+      if (!skipped.length) await alertBox('結合できるページがありませんでした');
+      return;
+    }
     await openResult(await doc.save(), '結合.pdf');
   } catch (e) {
     await alertBox('結合できませんでした', e.message);
@@ -265,7 +281,7 @@ export async function insertFile(at = null, files = null) {
   if (!requireDoc() || !allowed('assemble')) return;
   files = files || await window.api.openDialog({ title: '挿入する PDF / 画像', multiple: true, filters: [{ name: 'PDF / 画像', extensions: SOURCE_EXT }] });
   if (!files.length) return;
-  const usable = files.filter((f) => /\.(pdf|png|jpe?g|tiff?)$/i.test(f.name));
+  const usable = files.filter((f) => /\.(pdf|png|jpe?g|tiff?|gif|bmp|webp)$/i.test(f.name));
   if (!usable.length) return alertBox('挿入できるファイルがありません', 'PDF・PNG・JPEG を指定してください。');
   const pos = at ?? Math.max(...targets()) + 1;
   let n = 0;

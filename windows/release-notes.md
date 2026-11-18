@@ -1,19 +1,20 @@
-## PDF Studio 1.5.19
+## PDF Studio 1.5.20
 
-- 大きな図面（白黒の TIFF など）を拡大したとき、すぐに鮮明になるようにしました。画面に見えている部分だけを細かく描きます（これまでは 2 倍以上に拡大するとぼやけたままでした）
-- 5 億画素ほどの大きな図面も、最初の表示が速くなりました
+- 「ファイルから PDF を作成」「複数のファイルを結合」「ファイルからページを挿入」で、拡張子と中身が違う画像（中身が JPEG や WebP の .png など）も読み込めるようにしました（これまでは「The input is not a PNG file!」と出て作成できませんでした）
+- 「ファイルから PDF を作成」で PowerPoint・Excel など対応していないファイルを選んだとき、文字化けしたページを作らず、PDF にできなかったファイルとして知らせるようにしました
+- 最後のタブを閉じても PDF Studio が終了しないようにしました（空のタブが残ります）。終了するときはウィンドウの × で閉じてください（空のタブを閉じたときも終了します）
 
-1.5.18 までの変更（タブ、並べて表示、テンキーでの拡大・縮小など）も含みます。Mac 版は 1.5.18 の配布ページにあります。
-
-**インストール版**：`PDF-Studio-Setup-1.5.19.exe` をダウンロードし、PDF Studio を閉じてから実行してください。
-**インストール不要版**：`PDF-Studio-1.5.19-win.zip` をダウンロードして展開し、中の `PDF Studio.exe` を起動してください。
-
----
-
-- Large drawings (such as black-and-white TIFF files) now become sharp quickly when you zoom in: only the visible area is drawn at screen resolution (previously they stayed blurry at 2× and above).
-- Very large drawings (about 500 megapixels) now appear faster.
+**インストール版**：`PDF-Studio-Setup-1.5.20.exe` をダウンロードし、PDF Studio を閉じてから実行してください。
+**インストール不要版**：`PDF-Studio-1.5.20-win.zip` をダウンロードして展開し、中の `PDF Studio.exe` を起動してください。
 
 ---
 
-- แบบขนาดใหญ่ (เช่น TIFF ขาวดำ) จะคมชัดอย่างรวดเร็วเมื่อซูมเข้า โดยวาดเฉพาะส่วนที่มองเห็นด้วยความละเอียดของหน้าจอ
-- แบบขนาดใหญ่มาก (ประมาณ 500 ล้านพิกเซล) แสดงผลเร็วขึ้น
+- "Create PDF from Files", "Combine Files" and "Insert Pages from File" now read images whose extension does not match their content (for example a .png that is actually a JPEG or WebP). Previously this failed with "The input is not a PNG file!".
+- "Create PDF from Files" no longer makes garbled pages from unsupported files such as PowerPoint or Excel; it lists them as files that could not be converted.
+- Closing the last tab no longer quits PDF Studio; an empty tab remains. Close the window (or the empty tab) to quit.
+
+---
+
+- "สร้างจากไฟล์" "รวม" และ "แทรกหน้า" อ่านรูปภาพที่นามสกุลไม่ตรงกับเนื้อหาได้แล้ว (เช่น ไฟล์ .png ที่จริงเป็น JPEG หรือ WebP)
+- "สร้างจากไฟล์" จะไม่สร้างหน้าที่อ่านไม่ออกจากไฟล์ที่ไม่รองรับ เช่น PowerPoint หรือ Excel แต่จะแจ้งรายชื่อไฟล์ที่แปลงไม่ได้
+- การปิดแท็บสุดท้ายจะไม่ปิด PDF Studio อีกต่อไป (จะเหลือแท็บว่าง) ปิดหน้าต่างเพื่อออกจากโปรแกรม

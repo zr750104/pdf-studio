@@ -1012,7 +1012,15 @@ async function tabTests() {
     // アプリが前面にない（この Mac を使っている最中など）と、ウィンドウが見えないため描画を確かめられない
     await log(`⚠️ 移したタブの描画はこの環境では確かめられない (visibility=${visMv}, 前面のウィンドウ=${infoMv.focused})`);
   }
-  await tab({ do: 'close-any', id: mv });
+  if (infoMv.ready) {
+    // 最後のタブを × で閉じても、ウィンドウは閉じずに空のタブが残る
+    const rc = await tab({ do: 'request-close-any', id: mv });
+    check(rc.windowOpen && rc.tabs.length === 1 && rc.tabs[0].empty, `最後のタブを閉じても空のタブが残りアプリは終わらない (${JSON.stringify(rc)})`);
+    for (const x of rc.tabs) await tab({ do: 'close-any', id: x.id });
+  } else {
+    await log('⚠️ 最後のタブを閉じたときの動き：この環境では確かめられない（新しいウィンドウが表示されない）');
+    await tab({ do: 'close-any', id: mv });
+  }
   for (const n of ['m1.pdf', 'm2.pdf']) await tab({ do: 'force-close', id: idOf(n) });
   await tab({ do: 'activate', id: self });
   await sleep(300);
@@ -1346,6 +1354,53 @@ export async function run() {
     const png = await canvasToBytes(c, 'image/png');
     await changeStructure((lib) => insertFromSources(lib, before12, [{ name: 'x.png', bytes: png }]));
     check(state.pageIds.length === before12 + 1, '画像をページとして挿入');
+
+    // 12b. ファイルから作成：拡張子でなく中身で見分ける。対応していない形式（PowerPoint・Excel）は文字化けさせずに知らせる
+    {
+      const jpg = await canvasToBytes(c, 'image/jpeg');
+      const webp = await canvasToBytes(c, 'image/webp');
+      const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+      const enc = (x) => new TextEncoder().encode(x);
+      const skipped = [];
+      const d = await F.sourcesToPdf([
+        { name: 'photo.png', bytes: jpg },           // 中身は JPEG（以前は「The input is not a PNG file!」）
+        { name: 'image.png', bytes: webp },          // 中身は WebP
+        { name: 'real.png', bytes: png },
+        { name: 'slides.pptx', bytes: zip },
+        { name: 'sheet.xlsx', bytes: zip },
+        { name: 'broken.pdf', bytes: enc('%PDF-1.7 broken') }
+      ], skipped);
+      check(d.getPageCount() === 3, `ファイルから作成：拡張子と中身が違う画像も読み込む (${d.getPageCount()} ページ)`);
+      check(skipped.length === 3 && skipped.map((x) => x.name).join() === 'slides.pptx,sheet.xlsx,broken.pdf' && !skipped.some((x) => x.cancelled),
+        `ファイルから作成：PowerPoint・Excel・壊れた PDF は読み込まずに知らせる (${skipped.map((x) => `${x.name}: ${x.reason}`).join(' / ')})`);
+      const k = (name, bytes) => F.sniffKind(name, bytes);
+      const bmpHead = new Uint8Array(30); bmpHead.set([0x42, 0x4d], 0); bmpHead[14] = 40;
+      const cases = [
+        [k('a.txt', enc('hello')), 'text'], [k('memo.txt', enc('BMI,height,weight\n22,170,64')), 'text'],
+        [k('notes.md', enc('# PDF のメモ\n%PDF-1.7 という見出しで始まる')), 'text'], [k('app.log', enc('started\nok')), 'text'],
+        [k('data.json', enc('{"a":1}')), 'text'], [k('a.docx', zip), 'docx'], [k('a.exe', new Uint8Array([0x4d, 0x5a, 0, 0])), null],
+        [k('old.xls', new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])), null], [k('x.bmp', bmpHead), 'image'],
+        [k('junk.pdf', enc('garbage\n%PDF-1.4\n')), 'pdf'], [k('scan.png', new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0])), 'tiff'],
+        [k('empty.png', new Uint8Array(0)), null], [k('a.bin', new Uint8Array([1, 2, 0, 4, 5])), null],
+        [k('codes.csv', enc('MZ001,abc\nMZ002,def')), 'text'], [k('unicode.txt', new Uint8Array([0xff, 0xfe, 0x42, 0x30, 0x0a, 0x00])), 'text'],
+        [k('doc.rtf', enc('{\\rtf1\\ansi hello}')), null], [k('sjis.txt', new Uint8Array([0x82, 0xa0, 0x82, 0xa2, 0x0d, 0x0a, 0x82, 0xa4])), 'text'],
+        [k('long.log', enc('\x1b[32m処理が完了しました\x1b[0m\n'.repeat(300).slice(1))), 'text']
+      ];
+      const bad = cases.map(([got, want], i) => (got === want ? null : `${i}:${got}≠${want}`)).filter(Boolean);
+      check(!bad.length, `ファイルから作成：中身で形式を見分ける (${bad.join(', ') || 'OK'})`);
+      // Shift_JIS・UTF-16 のテキストも文字化けせずに PDF になる
+      for (const [nm, bytes] of [['sjis.txt', new Uint8Array([0x82, 0xa0, 0x82, 0xa2, 0x82, 0xa4, 0x82, 0xa6, 0x82, 0xa8])], ['u16.txt', new Uint8Array([0xff, 0xfe, 0x42, 0x30, 0x44, 0x30, 0x46, 0x30, 0x48, 0x30, 0x4a, 0x30])]]) {
+        await api.writeFile(`${out}/${nm}`, bytes);
+        const sk = [];
+        const td = await F.sourcesToPdf([{ name: nm, path: `${out}/${nm}`, bytes }], sk);
+        const tx = td.getPageCount() ? (await textOf(await td.save())).text : '';
+        check(tx.replace(/\s/g, '').includes('あいうえお'), `ファイルから作成：${nm} の日本語が文字化けしない (${tx.slice(0, 20)} ${sk.map((x) => x.reason).join()})`);
+      }
+      // ページの挿入も、中身が JPEG の .png を読み込める
+      const beforeIns = state.pageIds.length;
+      await changeStructure((lib) => insertFromSources(lib, beforeIns, [{ name: 'photo.png', bytes: jpg }]));
+      check(state.pageIds.length === beforeIns + 1, 'ページの挿入：中身が JPEG の .png も挿入できる');
+    }
 
     // 13. フラット化
     answer({});

@@ -2,9 +2,9 @@
 // 開いている文書（state）には触らず、ファイルごとに pdf-lib / pdf.js で読み込んで処理する
 import { PL, pdfjsLib, PDFJS_OPTS, saveLib, loadLib, readPermissions, collectGarbage, addInvisibleText, jpFont, flattenAnnotations } from './doc.js';
 import {
-  askPassword, sourcesToPdf, renderToCanvas, getOcrWorker, releaseOcrLater, cleanOcr, drawWatermark, drawHeaderFooter, textLines
+  askPassword, sourcesToPdf, sniffKind, renderToCanvas, getOcrWorker, releaseOcrLater, cleanOcr, drawWatermark, drawHeaderFooter, textLines
 } from './features.js';
-import { isTiff, addTiffPages } from './tiff.js';
+import { addTiffPages } from './tiff.js';
 import { el, ask, alertBox, toast, progress, canvasToBytes, baseName } from './util.js';
 import { t } from './i18n.js';
 
@@ -62,18 +62,22 @@ async function openPdfjs(lib) {
 
 /** 1 ファイルを PDF（pdf-lib）として読み込む */
 async function loadSource(f) {
-  const e = ext(f.name);
-  if (e === 'pdf') {
+  const kind = sniffKind(f.name, f.bytes);
+  if (kind === 'pdf') {
     const { lib, password } = await loadLib(new Uint8Array(f.bytes), askPassword, f.name);
     const perms = password != null ? await readPermissions(new Uint8Array(f.bytes), password) : null;
     return { lib, password, perms };
   }
-  if (isTiff(f.name)) {
+  if (kind === 'tiff') {
     const lib = await PDFDocument.create();
     await addTiffPages(lib, f.bytes);
     return { lib, password: null, perms: null };
   }
-  return { lib: await sourcesToPdf([f]), password: null, perms: null };
+  const skipped = [];
+  const lib = await sourcesToPdf([f], skipped);
+  if (skipped[0]?.cancelled) throw new Error('CANCELLED');
+  if (!lib.getPageCount()) throw new Error(skipped[0]?.reason || t('読み込めませんでした'));
+  return { lib, password: null, perms: null };
 }
 
 /** ページを画像にして作り直す（強力な圧縮） */

@@ -1203,20 +1203,23 @@ export function insertBlank(doc, at, size) {
 /** 別の PDF / 画像のバイト列からページを挿入。暗号化 PDF はパスワードを尋ねる */
 export async function insertFromSources(doc, at, sources, askPassword) {
   let n = 0;
+  const { sniffKind, embedImage } = await import('./sources.js');
   for (const s of sources) {
-    const lower = s.name.toLowerCase();
-    if (lower.endsWith('.pdf')) {
+    const kind = sniffKind(s.name, s.bytes);
+    if (kind === 'pdf') {
       const { lib: src } = await loadLib(new Uint8Array(s.bytes), askPassword, s.name);
       const pages = await doc.copyPages(src, src.getPageIndices());
       for (const p of pages) { doc.insertPage(at + n, p); n++; }
-    } else if (/\.tiff?$/.test(lower)) {
+    } else if (kind === 'tiff') {
       const { addTiffPages } = await import('./tiff.js');
       n += await addTiffPages(doc, s.bytes, { insertAt: at + n });
-    } else if (/\.(png|jpe?g)$/.test(lower)) {
-      const img = lower.endsWith('.png') ? await doc.embedPng(s.bytes) : await doc.embedJpg(s.bytes);
+    } else if (kind === 'png' || kind === 'jpeg' || kind === 'image') {
+      const img = await embedImage(doc, kind, s.bytes);
       const page = doc.insertPage(at + n, [img.width * 0.75, img.height * 0.75]);
       page.drawImage(img, { x: 0, y: 0, width: img.width * 0.75, height: img.height * 0.75 });
       n++;
+    } else {
+      throw new Error(`${s.name}: ${t('対応していない形式')}`);
     }
   }
   const objects = { ...state.objects };

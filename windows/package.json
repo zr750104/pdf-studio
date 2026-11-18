@@ -1,6 +1,6 @@
 {
   "name": "pdf-studio",
-  "version": "1.5.19",
+  "version": "1.5.20",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
