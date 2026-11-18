@@ -576,7 +576,12 @@
   "対応していない形式": "unsupported format",
   "読み込めませんでした": "could not be read",
   "次のファイルは PDF にできませんでした": "The following files could not be converted to PDF",
-  "対応している形式: PDF・画像（PNG / JPEG / GIF / BMP / WebP / TIFF）・Word（.docx）・テキスト（.txt / .md / .csv / .html）": "Supported formats: PDF, images (PNG / JPEG / GIF / BMP / WebP / TIFF), Word (.docx), text (.txt / .md / .csv / .html)"
+  "対応している形式: PDF・画像（PNG / JPEG / GIF / BMP / WebP / TIFF）・Word（.docx）・テキスト（.txt / .md / .csv / .html）": "Supported formats: PDF, images (PNG / JPEG / GIF / BMP / WebP / TIFF), Word (.docx), text (.txt / .md / .csv / .html)",
+  "今後は確認せず、次から同じ操作をする（「編集」メニューの「閉じるときの保存の確認」で戻せます）": "Don't ask again; do the same next time (change it in Edit > Save Prompt When Closing)",
+  "閉じるときの保存の確認": "Save Prompt When Closing",
+  "毎回確かめる": "Ask Every Time",
+  "確かめずに保存する": "Save Without Asking",
+  "確かめずに保存しない（変更は失われます）": "Don't Save Without Asking (changes are lost)"
  },
  "patterns": [
   [

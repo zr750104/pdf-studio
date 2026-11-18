@@ -200,6 +200,20 @@ async function ensurePage(i) {
 }
 
 function applySizes() {
+  // ページが増えた・表示の並べ方が変わった・実際のページの大きさが分かったときも、倍率を表示できる範囲に収める
+  const c = clampScale(view.scale);
+  if (c !== view.scale) {
+    view.scale = c;
+    for (const [k, e] of [...canvasCache]) if (e.scale !== c) cacheDrop(k);
+    // 選択枠のハンドルなど倍率に依存する部分も描き直す
+    queueMicrotask(() => { for (const [i, p] of view.pages.entries()) if (p.mounted) drawOverlay(i); });
+    clearTimeout(rerenderTimer);
+    rerenderTimer = setTimeout(() => {
+      runDetail();
+      for (const [i, p] of view.pages.entries()) if (p.mounted && p.canvasScale !== view.scale) enqueue(i);
+    }, 180);
+    queueMicrotask(() => emit('zoom-changed', view.scale));
+  }
   const s = view.scale;
   pagesEl.style.setProperty('--scale-factor', s);
   let maxW = 0;
@@ -215,6 +229,28 @@ function applySizes() {
   if (pagesEl.style.minWidth !== minW) pagesEl.style.minWidth = minW;
 }
 
+// 表示倍率の範囲（8.33%〜6400%。PDF-XChange Editor と同じ）
+export const MIN_SCALE = 1 / 12;
+export const MAX_SCALE = 64;
+// 画面の部品の高さには上限（Chromium で約 3,355 万ピクセル）があり、超えると下のページが表示できない。
+// ページ数が多い・大きな図面のときは、全ページを並べた高さがこれを超えない倍率までにする
+const MAX_LAYOUT_PX = 30_000_000;
+
+/** 倍率を表示できる範囲に収める */
+export function clampScale(s) {
+  let total = 0;
+  if (view.layout === 'two') {
+    // 2 ページずつ並べる。行の高さは高い方のページ。組み方がずれても大丈夫なよう、2 通りの組み方の大きい方で見積もる
+    const h = view.pages.map((p) => p.base.h + 16);
+    let a = 0, b = h[0] || 0;
+    for (let i = 0; i < h.length; i += 2) a += Math.max(h[i], h[i + 1] || 0);
+    for (let i = 1; i < h.length; i += 2) b += Math.max(h[i], h[i + 1] || 0);
+    total = Math.max(a, b);
+  } else for (const p of view.pages) total += p.base.h + 16;
+  const max = total > 0 ? Math.min(MAX_SCALE, MAX_LAYOUT_PX / total) : MAX_SCALE;
+  return Math.max(Math.min(MIN_SCALE, max), Math.min(max, s));
+}
+
 function computeFitScale() {
   const b = view.pages[0]?.base;
   if (!b) return;
@@ -222,7 +258,7 @@ function computeFitScale() {
   const availH = viewerEl.clientHeight - 32;
   const cols = view.layout === 'two' ? 2 : 1;
   const sw = (availW - (cols - 1) * 16) / (b.w * cols);
-  view.scale = Math.max(0.1, Math.min(6, view.fit === 'page' ? Math.min(sw, availH / b.h) : sw));
+  view.scale = clampScale(view.fit === 'page' ? Math.min(sw, availH / b.h) : sw);
 }
 
 function captureAnchor() {
@@ -254,7 +290,7 @@ export function zoomTo(scale, fit = null) {
   const anchor = captureAnchor();
   view.fit = fit;
   if (fit) computeFitScale();
-  else view.scale = Math.max(0.1, Math.min(6, scale));
+  else view.scale = clampScale(scale);
   // 倍率が変わったら、ほかの倍率で描いたキャッシュは使えないので捨てる
   for (const [k, e] of [...canvasCache]) if (e.scale !== view.scale) cacheDrop(k);
   applySizes();

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   setDirty: (d) => ipcRenderer.send('set-dirty', d),
   setTitle: (t) => ipcRenderer.send('set-title', t),
   closeWindow: () => ipcRenderer.send('close-window'),
+  saveCloseFailed: () => ipcRenderer.send('save-close-failed'),
   openDialog: (opts) => ipcRenderer.invoke('open-dialog', opts),
   saveDialog: (opts) => ipcRenderer.invoke('save-dialog', opts),
   chooseFolder: (title) => ipcRenderer.invoke('choose-folder', title),

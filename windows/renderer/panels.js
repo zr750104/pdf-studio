@@ -38,7 +38,7 @@ export function initToolbar(run) {
     if (n >= 1 && n <= view.pages.length) scrollToPage(n - 1);
   });
   const zoomSel = el('select', { id: 'zoom-select', title: '表示倍率' },
-    ...[['width', '幅に合わせる'], ['page', 'ページ全体'], ['0.5', '50%'], ['0.75', '75%'], ['1', '100%'], ['1.25', '125%'], ['1.5', '150%'], ['2', '200%'], ['3', '300%'], ['custom', '']].map(([v, l]) => el('option', { value: v }, l)));
+    ...[['width', '幅に合わせる'], ['page', 'ページ全体'], [String(1 / 12), '8.33%'], ['0.125', '12.5%'], ['0.25', '25%'], ['0.5', '50%'], ['0.75', '75%'], ['1', '100%'], ['1.25', '125%'], ['1.5', '150%'], ['2', '200%'], ['3', '300%'], ['4', '400%'], ['8', '800%'], ['16', '1600%'], ['24', '2400%'], ['32', '3200%'], ['64', '6400%'], ['custom', '']].map(([v, l]) => el('option', { value: v }, l)));
   zoomSel.addEventListener('change', () => {
     const v = zoomSel.value;
     if (v === 'width' || v === 'page') zoomTo(view.scale, v);

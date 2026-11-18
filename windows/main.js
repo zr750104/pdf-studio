@@ -265,28 +265,68 @@ function updateTitle(host) {
   host.win.setTitle(host.active?.title || 'PDF Studio');
 }
 
-/** 保存していない変更があれば確かめる。0 保存 / 1 保存しない / 2 キャンセル */
-function askSave(win) {
+// 閉じるときの保存の確認（ask: 毎回確かめる / save: 確かめずに保存 / discard: 確かめずに保存しない）。
+// 自動テストでは本物の設定ファイルを書き換えないよう、メモリーだけに持つ
+const SAVE_PROMPTS = ['ask', 'save', 'discard'];
+let testSavePrompt = 'ask';
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+const readSettingsFile = () => { try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; } };
+function savePrompt() {
+  const v = SELFTEST ? testSavePrompt : readSettingsFile().savePrompt;
+  return SAVE_PROMPTS.includes(v) ? v : 'ask';
+}
+function setSavePrompt(v) {
+  if (!SAVE_PROMPTS.includes(v)) return;
+  if (SELFTEST) testSavePrompt = v;
+  else { try { fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettingsFile(), savePrompt: v })); } catch { /* 保存できなくても動作は続ける */ } }
+  buildMenu();
+}
+
+/** 保存していない変更があれば確かめる。0 保存 / 1 保存しない / 2 キャンセル。
+ *  「今後は確認しない」に印を付けて保存・保存しないを選ぶと、次からはその操作を確かめずに行う（キャンセルは覚えない）。
+ *  チェックボックスの状態は同期版のダイアログでは受け取れないため、非同期で表示する */
+async function askSave(win, tab = null, { force = false } = {}) {
+  const pref = force ? 'ask' : savePrompt();
+  // 確かめずに保存したタブは、保存できなかったとき（名前を付けて保存のキャンセル・書き込みの失敗）にいつもの確認を出す
+  if (tab) tab.autoSaved = pref === 'save';
+  if (pref === 'save') return 0;
+  if (pref === 'discard') return 1;
   const q = fromQueue('askSave');
-  if (q.hit) return q.v;
-  return dialog.showMessageBoxSync(win, {
-    type: 'warning',
-    buttons: [T('保存'), T('保存しない'), T('キャンセル')],
-    defaultId: 0,
-    cancelId: 2,
-    message: T('変更内容を保存しますか？'),
-    detail: T('保存しないと変更内容は失われます。')
-  });
+  let response, checkboxChecked = false;
+  if (q.hit) {
+    // 自動テスト：数字だけなら選んだボタン、{ r, remember } なら「今後は確認しない」にも印を付けた
+    if (typeof q.v === 'object') ({ r: response, remember: checkboxChecked } = q.v);
+    else response = q.v;
+  } else {
+    ({ response, checkboxChecked } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: [T('保存'), T('保存しない'), T('キャンセル')],
+      defaultId: 0,
+      cancelId: 2,
+      message: T('変更内容を保存しますか？'),
+      detail: T('保存しないと変更内容は失われます。'),
+      checkboxLabel: T('今後は確認せず、次から同じ操作をする（「編集」メニューの「閉じるときの保存の確認」で戻せます）')
+    }));
+  }
+  if (checkboxChecked && (response === 0 || response === 1)) setSavePrompt(response === 0 ? 'save' : 'discard');
+  return response;
 }
 
 /** タブを閉じる（保存していなければ確かめる）。閉じなかったら false */
-function requestCloseTab(tab) {
+async function requestCloseTab(tab) {
   if (windows.get(tab.id) !== tab) return true; // もう閉じている
   const host = tab.host;
+  // 確認を表示している間は、ほかの閉じる操作を受け付けない（確認が重なって出ないように）
+  if (host.asking) return false;
   host.closing = false;
   if (tab.dirty && !tab.forceClose) {
     activateTab(host, tab);
-    const r = askSave(host.win);
+    host.asking = true;
+    let r;
+    try { r = await askSave(host.win, tab); } finally { host.asking = false; }
+    // 確かめている間に、タブが閉じられた・別のウィンドウへ移った・ウィンドウが閉じた
+    if (windows.get(tab.id) !== tab) return true;
+    if (tab.host !== host || host.win.isDestroyed()) return false;
     if (r === 2) return false;
     if (r === 0) { tab.wc.send('menu', 'save-and-close'); return 'pending'; }
   }
@@ -363,18 +403,37 @@ function onWindowClose(host, e) {
   const dirty = host.tabs.filter((t) => t.dirty && !t.forceClose);
   if (!dirty.length) return;
   e.preventDefault();
+  if (host.asking) return null;
+  return closeDirtyTabs(host, dirty);
+}
+
+async function closeDirtyTabs(host, dirty) {
+  host.asking = true;
+  try {
+    await askEachDirty(host, dirty);
+  } finally {
+    host.asking = false;
+  }
+}
+
+async function askEachDirty(host, dirty) {
   // 「保存しない」はウィンドウを閉じると決まるまで印を付けない（途中でキャンセルしたら確認が残るように）
   const discard = [];
   for (const tab of dirty) {
+    // 確かめている間に閉じた・別のウィンドウへ移ったタブは飛ばす
+    if (windows.get(tab.id) !== tab || tab.host !== host) continue;
     activateTab(host, tab);
-    const r = askSave(host.win);
+    const r = await askSave(host.win, tab);
+    if (host.win.isDestroyed()) return;
     if (r === 2) { host.closing = false; return; }
+    // 確かめている間に、保存が終わって閉じた・別のウィンドウへ移ったタブは飛ばす
+    if (windows.get(tab.id) !== tab || tab.host !== host) continue;
     if (r === 1) { discard.push(tab); continue; }
     // 先に「保存しない」を選んだタブは閉じる（保存のあとウィンドウを閉じ直すときに、もう一度聞かない）
-    for (const t of discard) destroyTab(t, { keepWindow: true });
+    for (const t of discard) if (windows.get(t.id) === t) destroyTab(t, { keepWindow: true });
     // 保存してから閉じる。保存できたらタブが閉じ、続けてウィンドウを閉じ直す
-    host.closing = true;
     tab.wc.send('menu', 'save-and-close');
+    host.closing = true;
     return;
   }
   for (const t of discard) t.forceClose = true;
@@ -471,7 +530,13 @@ function buildMenu() {
         { label: 'コピー', role: 'copy' },
         { label: '貼り付け', role: 'paste' },
         sep,
-        m('検索...', 'find', 'CmdOrCtrl+F')
+        m('検索...', 'find', 'CmdOrCtrl+F'),
+        sep,
+        {
+          label: '閉じるときの保存の確認',
+          submenu: [['ask', '毎回確かめる'], ['save', '確かめずに保存する'], ['discard', '確かめずに保存しない（変更は失われます）']]
+            .map(([v, label]) => ({ label, type: 'radio', checked: savePrompt() === v, click: () => setSavePrompt(v) }))
+        }
       ]
     },
     {
@@ -604,6 +669,31 @@ ipcMain.on('set-title', (e, title) => {
   sendStrip(tab.host);
 });
 
+// 「保存して閉じる」で保存できなかった（名前を付けて保存のキャンセル・書き込みの失敗）。
+// 確かめずに保存する設定で閉じようとしていたときは、閉じられなくならないよう、この回だけいつもの確認を出す
+ipcMain.on('save-close-failed', async (e) => {
+  const tab = entryFor(e);
+  if (!tab) return;
+  const host = tab.host;
+  const closing = host.closing;
+  const auto = tab.autoSaved;
+  tab.autoSaved = false;
+  host.closing = false;
+  if (!auto || host.asking || host.win.isDestroyed()) return;
+  host.asking = true;
+  let r;
+  try { r = await askSave(host.win, null, { force: true }); } finally { host.asking = false; }
+  if (windows.get(tab.id) !== tab || tab.host !== host || host.win.isDestroyed()) return;
+  if (r === 0) {
+    tab.wc.send('menu', 'save-and-close');
+    host.closing = closing;
+  } else if (r === 1) {
+    tab.forceClose = true;
+    if (closing) host.win.close();
+    else { keepWindowOpen(host, tab); destroyTab(tab); }
+  }
+});
+
 ipcMain.on('close-window', (e) => {
   const entry = entryFor(e);
   if (!entry) return;
@@ -714,7 +804,7 @@ ipcMain.on('tabs:menu', (e, id) => {
   const others = () => h.tabs.filter((x) => x !== t);
   Menu.buildFromTemplate([
     { label: T('タブを閉じる'), click: () => requestCloseTab(t) },
-    { label: T('ほかのタブを閉じる'), enabled: h.tabs.length > 1, click: () => { for (const x of others()) if (requestCloseTab(x) !== true) break; } },
+    { label: T('ほかのタブを閉じる'), enabled: h.tabs.length > 1, click: async () => { for (const x of others()) if ((await requestCloseTab(x)) !== true) break; } },
     { type: 'separator' },
     { label: T('新しいウィンドウに移す'), enabled: h.tabs.length > 1, click: () => moveTabToNewWindow(t) }
   ]).popup({ window: h.win });
@@ -752,7 +842,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     const t = arg.id != null ? tabOf(h, arg.id) : null;
     if (arg.do === 'new') return addTab(h, null, { activate: !!arg.activate }).id;
     if (arg.do === 'activate' && t) { activateTab(h, t); return true; }
-    if (arg.do === 'close' && t) return requestCloseTab(t);
+    if (arg.do === 'close' && t) return await requestCloseTab(t);
     if (arg.do === 'force-close' && t) { destroyTab(t); return true; }
     if (arg.do === 'mode') { setMode(h, arg.mode); return true; }
     if (arg.do === 'menu') { send(arg.action, h); return true; }
@@ -767,7 +857,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     if (arg.do === 'request-close-any' && any) {
       // タブの × と同じ閉じ方。閉じたあとのそのウィンドウの様子を返す
       const h = any.host;
-      requestCloseTab(any);
+      await requestCloseTab(any);
       return { windowOpen: !h.win.isDestroyed() && !h.forceClose, tabs: h.tabs.map((x) => ({ id: x.id, empty: x.empty })) };
     }
     if (arg.do === 'front-any' && any) {
@@ -784,7 +874,17 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
       return { ready: any.host.ready, inTabs: any.host.tabs.includes(any), active: any.host.active === any, viewVisible: any.view.getVisible(), winVisible: w.isVisible(), winFocused: w.isFocused(), focused: f ? (f === w ? 'moved' : f === entry.host.win ? 'main' : 'other') : 'none', moved: w.getBounds(), main: entry.host.win.getBounds() };
     }
     if (arg.do === 'askSave') { selftestQueue.askSave.push(...arg.answers); return true; }
-    if (arg.do === 'window-close') { let prevented = false; onWindowClose(h, { preventDefault: () => { prevented = true; } }); return prevented; }
+    if (arg.do === 'window-close') { let prevented = false; await onWindowClose(h, { preventDefault: () => { prevented = true; } }); return prevented; }
+    if (arg.do === 'ask-save') return await askSave(h.win);
+    if (arg.do === 'busy-close' && t) { h.asking = true; try { return await requestCloseTab(t); } finally { h.asking = false; } }
+    if (arg.do === 'askSave-clear') { const n = selftestQueue.askSave.length; selftestQueue.askSave.length = 0; return n; }
+    if (arg.do === 'menu-save-prompt') {
+      // メニューの「閉じるときの保存の確認」で選ばれている項目
+      const ed = Menu.getApplicationMenu()?.items.find((it) => it.submenu?.items.some((x) => x.submenu?.items.length === 3 && x.submenu.items.every((y) => y.type === 'radio')));
+      const sub = ed?.submenu.items.find((x) => x.submenu?.items.length === 3 && x.submenu.items.every((y) => y.type === 'radio'));
+      return sub ? sub.submenu.items.findIndex((y) => y.checked) : -1;
+    }
+    if (arg.do === 'save-prompt') { if (arg.value) setSavePrompt(arg.value); return savePrompt(); }
     if (arg.do === 'state') return t ? { dirty: t.dirty, forceClose: t.forceClose, open: true } : { open: false };
     if (arg.do === 'focus-self') { h.win.focus(); return true; }
     return null;
@@ -840,7 +940,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     const host = entry.host;
     if (!PERFTEST && host.ready && host.tabs.length === 1 && !entry.empty) {
       entry.dirty = false;
-      requestCloseTab(entry);
+      await requestCloseTab(entry);
       const ok = !host.win.isDestroyed() && !host.forceClose && host.tabs.length === 1 && host.tabs[0] !== entry && host.tabs[0].empty;
       const line = `${ok ? '✅' : '❌'} 最後のタブを閉じても空のタブが残りアプリは終わらない (タブ ${host.tabs.length})`;
       process.stdout.write(line + '\n');

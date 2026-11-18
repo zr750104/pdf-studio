@@ -134,6 +134,7 @@ async function writeTo(path) {
 
 export async function saveAndClose() {
   if (await save()) window.api.closeWindow();
+  else window.api.saveCloseFailed();
 }
 
 export async function newBlank() {

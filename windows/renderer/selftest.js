@@ -3,7 +3,7 @@ import {
   state, PL, pdfjsLib, PDFJS_OPTS, openBytes, buildOutput, jpFont, pageText, undo, redo, changeStructure, insertFromSources,
   rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib
 } from './doc.js';
-import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation } from './viewer.js';
+import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, clampScale, MAX_SCALE, MIN_SCALE, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation } from './viewer.js';
 import { textStamp, hanko, chooseStamp } from './stamps.js';
 import * as F from './features.js';
 import { runBatch, batchProcess } from './batch.js';
@@ -532,6 +532,60 @@ async function scanFastTests() {
     await whenIdle();
     await sleep(400);
     check(!view.pages[0]?.div.querySelector('canvas.page-detail'), '元の大きさに戻すと、細かい画像はなくなる');
+    // 6400%（PDF-XChange Editor と同じ上限）まで拡大でき、見えている部分は画素数の上限内で描かれる
+    zoomTo(64);
+    let d64 = null;
+    for (let k = 0; k < 300; k++) {
+      d64 = view.pages[0]?.div.querySelector('canvas.page-detail');
+      if (d64 && d64.dataset.scale === String(view.scale)) break;
+      await sleep(20);
+    }
+    const sel = document.getElementById('zoom-select');
+    check(view.scale === MAX_SCALE && d64 && d64.width * d64.height <= 16 * 1024 * 1024 && sel?.value === '64',
+      `6400% まで拡大でき、見えている部分だけを描く (倍率 ${view.scale}、${d64 ? `${d64.width}×${d64.height}` : 'なし'}、表示 ${sel?.value})`);
+    zoomTo(0.01);
+    check(Math.abs(view.scale - MIN_SCALE) < 1e-9, `縮小は 8.33% まで (${(view.scale * 100).toFixed(2)}%)`);
+    zoomTo(1000);
+    check(view.scale === MAX_SCALE, '6400% より大きくはならない');
+    // ページを並べた高さが画面の部品の上限を超えない（ページが多いときは上限の倍率を下げる）
+    const total = view.pages.reduce((a, q) => a + q.base.h + 16, 0);
+    const fake = Math.ceil(30_000_000 / (total * 8));
+    const saved = view.pages;
+    view.pages = Array.from({ length: fake }, () => saved).flat();
+    const capped = clampScale(64);
+    view.pages = saved;
+    check(capped < 64 && capped * total * fake <= 30_000_000 * 1.001 && capped >= 7.9, `ページが多いときは、並べた高さが上限を超えない倍率まで (${capped.toFixed(2)})`);
+    // 見開き：高さが違うページが並ぶときは、行ごとに高い方で見積もる
+    view.pages = Array.from({ length: 40000 }, (_, k) => ({ base: { w: 100, h: k % 2 ? 1000 : 10 } }));
+    const prevLayout = view.layout;
+    view.layout = 'two';
+    const cap2 = clampScale(64);
+    view.layout = prevLayout;
+    view.pages = saved;
+    check(cap2 * 20000 * 1016 <= 30_000_000 * 1.001, `見開きで高さが違うページでも、並べた高さが上限を超えない (${cap2.toFixed(3)})`);
+    // 文字や図形の PDF（スキャン画像でない）でも、6400% で見えている部分を細かく描く
+    await openBytes(await makeSample(), { name: 'vector.pdf', askPassword: async () => null });
+    await ready();
+    setDetailThreshold(1024 * 1024);
+    zoomTo(64);
+    // 見出しの文字（ページの左上から 50pt 付近）が見える位置へ動かす
+    const vEl = document.getElementById('viewer');
+    const pd = view.pages[0].div;
+    vEl.scrollLeft = pd.offsetLeft + 50 * 64;
+    vEl.scrollTop = pd.offsetTop + 45 * 64;
+    await sleep(100);
+    let dv = null;
+    for (let k = 0; k < 300; k++) {
+      dv = pd.querySelector('canvas.page-detail');
+      if (dv && dv.dataset.scale === String(view.scale) && +dv.dataset.rect.split(',')[0] > 1000) break;
+      await sleep(20);
+    }
+    let inked = false;
+    if (dv) { const px = dv.getContext('2d').getImageData(0, 0, dv.width, dv.height).data; for (let q = 0; q < px.length; q += 4) if (px[q + 3] && px[q] < 250) { inked = true; break; } }
+    check(view.scale === 64 && dv && inked && dv.width * dv.height <= 16 * 1024 * 1024, `文字・図形の PDF も 6400% で見えている部分を描く (${dv ? `${dv.width}×${dv.height}` : 'なし'}${inked ? '' : '、白紙の範囲'})`);
+    setDetailThreshold(0);
+    zoomTo(view.scale, 'width');
+    await whenIdle();
   }
   // 回転（90/180/270）
   const lib = await PL.PDFDocument.create();
@@ -934,6 +988,47 @@ async function tabTests() {
   await tab({ do: 'askSave', answers: [1] });
   const r2 = await tab({ do: 'close', id: other });
   check(r2 === true && !(await tab({ do: 'state', id: other })).open, '「保存しない」でタブを閉じる');
+  // 「今後は確認しない」：キャンセルは覚えない。「保存しない」を覚えると、次からは確かめずに閉じる
+  await tab({ do: 'askSave', answers: [{ r: 2, remember: true }] });
+  const r3 = await tab({ do: 'close', id: third });
+  check(r3 === false && (await tab({ do: 'state', id: third })).open && (await tab({ do: 'save-prompt' })) === 'ask', '「今後は確認しない」に印を付けても、キャンセルは覚えない');
+  await tab({ do: 'askSave', answers: [{ r: 1, remember: true }] });
+  const r4 = await tab({ do: 'close', id: third });
+  check(r4 === true && !(await tab({ do: 'state', id: third })).open && (await tab({ do: 'save-prompt' })) === 'discard' && (await tab({ do: 'menu-save-prompt' })) === 2,
+    '「今後は確認しない」で「保存しない」を選ぶと覚え、メニューにも表示される');
+  const fifth = await tab({ do: 'new' });
+  await sleep(200);
+  await tab({ do: 'eval', id: fifth, js: 'window.api.setDirty(true)' });
+  await sleep(100);
+  await tab({ do: 'askSave', answers: [2] });
+  const r5 = await tab({ do: 'close', id: fifth });
+  check(r5 === true && !(await tab({ do: 'state', id: fifth })).open && (await tab({ do: 'askSave-clear' })) === 1, '覚えたあとは、確かめずに保存しないで閉じる');
+  await tab({ do: 'save-prompt', value: 'save' });
+  await tab({ do: 'askSave', answers: [2] });
+  check((await tab({ do: 'ask-save' })) === 0 && (await tab({ do: 'askSave-clear' })) === 1 && (await tab({ do: 'menu-save-prompt' })) === 1, '「確かめずに保存する」を選ぶと、確かめずに保存する');
+  // 確かめずに保存する設定でも、保存できなかったとき（ここでは文書のないタブ）は、いつもの確認を出す（閉じられなくならない）
+  const sixth = await tab({ do: 'new' });
+  await sleep(200);
+  await tab({ do: 'eval', id: sixth, js: 'window.api.setDirty(true)' });
+  await sleep(100);
+  await tab({ do: 'askSave', answers: [1] });
+  const r6 = await tab({ do: 'close', id: sixth });
+  let st6 = null;
+  for (let k = 0; k < 100; k++) { st6 = await tab({ do: 'state', id: sixth }); if (!st6.open) break; await sleep(30); }
+  check(r6 === 'pending' && !st6.open && (await tab({ do: 'askSave-clear' })) === 0 && (await tab({ do: 'save-prompt' })) === 'save',
+    `確かめずに保存する設定で保存できなかったときは、確認を出して「保存しない」で閉じられる (${r6}, ${JSON.stringify(st6)})`);
+  // 追加した文言が英語・タイ語に訳されている
+  const untranslated = [];
+  for (const lang of ['en', 'th']) {
+    const dict = await (await fetch(`../i18n/${lang}.json`)).json();
+    for (const k of ['今後は確認せず、次から同じ操作をする（「編集」メニューの「閉じるときの保存の確認」で戻せます）', '閉じるときの保存の確認', '毎回確かめる', '確かめずに保存する', '確かめずに保存しない（変更は失われます）']) if (!dict.strings?.[k]) untranslated.push(`${lang}: ${k}`);
+  }
+  check(!untranslated.length, `保存の確認の文言が英語・タイ語に訳されている${untranslated.length ? ` (${untranslated.join(' / ')})` : ''}`);
+  await tab({ do: 'save-prompt', value: 'ask' });
+  await tab({ do: 'askSave', answers: [{ r: 0, remember: false }] });
+  check((await tab({ do: 'ask-save' })) === 0 && (await tab({ do: 'save-prompt' })) === 'ask' && (await tab({ do: 'menu-save-prompt' })) === 0, 'メニューで「毎回確かめる」に戻すと、また確かめる');
+  // 確認を表示している間は、ほかの閉じる操作を受け付けない（確認が重ならない）
+  check((await tab({ do: 'busy-close', id: self })) === false, '確認を表示している間は、ほかのタブを閉じる操作で確認が重ならない');
   await tab({ do: 'force-close', id: third });
   await sleep(200);
   s = await info();
