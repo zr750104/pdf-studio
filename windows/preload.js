@@ -1,0 +1,33 @@
+// レンダラーに公開する API（Node.js の機能はここ経由でのみ使う）
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('api', {
+  getInitial: () => ipcRenderer.invoke('get-initial'),
+  setDirty: (d) => ipcRenderer.send('set-dirty', d),
+  setTitle: (t) => ipcRenderer.send('set-title', t),
+  closeWindow: () => ipcRenderer.send('close-window'),
+  openDialog: (opts) => ipcRenderer.invoke('open-dialog', opts),
+  saveDialog: (opts) => ipcRenderer.invoke('save-dialog', opts),
+  chooseFolder: (title) => ipcRenderer.invoke('choose-folder', title),
+  writeFile: (p, bytes) => ipcRenderer.invoke('write-file', p, bytes),
+  writeFiles: (folder, files) => ipcRenderer.invoke('write-files', folder, files),
+  readAsset: (rel) => ipcRenderer.invoke('read-asset', rel),
+  openInNewWindow: (bytes, name, path) => ipcRenderer.invoke('open-in-new-window', bytes, name, path),
+  showInFolder: (p) => ipcRenderer.invoke('show-in-folder', p),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  messageBox: (opts) => ipcRenderer.invoke('message-box', opts),
+  convertToPdf: (p) => ipcRenderer.invoke('convert-to-pdf', p),
+  exportDocx: (p, pages) => ipcRenderer.invoke('export-docx', p, pages),
+  fileSize: (p) => ipcRenderer.invoke('file-size', p),
+  printBegin: () => ipcRenderer.invoke('print-begin'),
+  printPage: (job, index, bytes) => ipcRenderer.invoke('print-page', job, index, bytes),
+  printRun: (job, landscape) => ipcRenderer.invoke('print-run', job, landscape),
+  printCancel: (job) => ipcRenderer.invoke('print-cancel', job),
+  selftest: (cmd, arg) => ipcRenderer.invoke('selftest', cmd, arg),
+  onMenu: (cb) => ipcRenderer.on('menu', (e, action) => cb(action)),
+  getLang: () => ipcRenderer.sendSync('get-lang'),
+  logError: (source, err) => ipcRenderer.send('log-error', source, err),
+  logInfo: (msg) => ipcRenderer.send('log-info', msg),
+  onLang: (cb) => ipcRenderer.on('lang', (e, l) => cb(l)),
+  onToast: (cb) => ipcRenderer.on('toast', (e, m) => cb(m))
+});

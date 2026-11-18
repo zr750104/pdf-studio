@@ -1,0 +1,66 @@
+/* タブバー（ウィンドウ上部）。文書の画面はこの下に重ねて表示される */
+:root {
+  --strip: #dcdcdc;
+  --tab: #ececec;
+  --tab-hover: #f6f6f6;
+  --tab-active: #ffffff;
+  --text: #222;
+  --muted: #666;
+  --accent: #c8102e;
+  --gap: #b9b9b9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --strip: #1f1f1f;
+    --tab: #2a2a2a;
+    --tab-hover: #333;
+    --tab-active: #3a3a3a;
+    --text: #eee;
+    --muted: #aaa;
+    --accent: #ff5a6e;
+    --gap: #151515;
+  }
+}
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  background: var(--gap);
+  color: var(--text);
+  font: 12px "Segoe UI", "Yu Gothic UI", "Noto Sans JP", "Noto Sans Thai", sans-serif;
+  user-select: none;
+}
+#strip {
+  position: absolute; left: 0; right: 0; top: 0; height: 36px;
+  display: flex; align-items: flex-end; gap: 4px;
+  padding: 0 6px; box-sizing: border-box;
+  background: var(--strip);
+}
+#tablist { display: flex; align-items: flex-end; gap: 2px; min-width: 0; flex: 0 1 auto; overflow: hidden; height: 100%; }
+.tab {
+  display: flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 6px 0 10px; box-sizing: border-box;
+  width: 200px; min-width: 70px; flex: 0 1 auto;
+  background: var(--tab); border-radius: 7px 7px 0 0;
+  cursor: default;
+}
+.tab:hover { background: var(--tab-hover); }
+.tab.active { background: var(--tab-active); box-shadow: inset 0 2px 0 var(--accent); }
+.tab.shown:not(.active) { box-shadow: inset 0 2px 0 var(--muted); }
+.tab.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.tab .label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tab .dot { color: var(--accent); font-size: 10px; }
+.tab .x {
+  width: 18px; height: 18px; border: 0; border-radius: 4px; padding: 0;
+  background: transparent; color: var(--muted); font-size: 14px; line-height: 18px;
+}
+.tab .x:hover { background: rgba(127, 127, 127, 0.3); color: var(--text); }
+.icon-btn {
+  width: 28px; height: 28px; margin-bottom: 2px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text); font-size: 18px; line-height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.icon-btn:hover { background: rgba(127, 127, 127, 0.25); }
+.icon-btn.on { color: var(--accent); }
+.spacer { flex: 1; }
+/* 並べて表示のとき、操作中の画面を囲む枠 */
+#frames .frame { position: absolute; box-sizing: border-box; border: 2px solid transparent; pointer-events: none; }
+#frames .frame.active { border-color: var(--accent); }

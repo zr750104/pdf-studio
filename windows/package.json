@@ -1,0 +1,125 @@
+{
+  "name": "pdf-studio",
+  "version": "1.5.19",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "vendor": "node scripts/vendor.js",
+    "gen-icons": "node scripts/gen-icons.js",
+    "test": "electron . --selftest",
+    "perf": "electron . --perftest",
+    "dist": "node scripts/vendor.js && electron-builder --win --x64",
+    "release": "bash scripts/release.sh"
+  },
+  "author": "zr750104",
+  "license": "UNLICENSED",
+  "description": "PDF の閲覧・注釈・編集・ページ整理・OCR・保護ができる PDF エディタ",
+  "dependencies": {
+    "docx": "9.5.1",
+    "electron-updater": "6.8.10",
+    "mammoth": "1.9.0",
+    "native-reg": "^1.1.1"
+  },
+  "devDependencies": {
+    "@cantoo/fontkit": "2.0.10",
+    "@cantoo/pdf-lib": "2.11.1",
+    "electron": "38.2.0",
+    "electron-builder": "26.0.12",
+    "lucide-static": "0.460.0",
+    "pdfjs-dist": "4.10.38",
+    "resedit": "3.0.2",
+    "tesseract.js": "5.1.1",
+    "utif": "^3.1.0"
+  },
+  "productName": "PDF Studio",
+  "build": {
+    "appId": "local.pdfstudio",
+    "productName": "PDF Studio",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "tabs-preload.js",
+      "updater.js",
+      "errorlog.js",
+      "defaultapp.js",
+      "package.json",
+      "i18n/**",
+      "renderer/**",
+      "!renderer/selftest.js",
+      "!renderer/perftest.js",
+      "assets/**",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.d.ts",
+      "!**/{test,tests,__tests__,docs,example,examples}/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "PDF Studio",
+      "language": "1041",
+      "artifactName": "PDF-Studio-Setup-${version}.exe",
+      "warningsAsErrors": false,
+      "installerLanguages": [
+        "ja_JP"
+      ],
+      "include": "build/installer.nsh"
+    },
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF 書類",
+        "description": "PDF 書類",
+        "role": "Editor"
+      },
+      {
+        "ext": [
+          "tif",
+          "tiff"
+        ],
+        "name": "PDFStudioTIFF",
+        "description": "TIFF 画像",
+        "role": "Viewer"
+      }
+    ],
+    "electronLanguages": [
+      "ja",
+      "en-US"
+    ],
+    "compression": "normal",
+    "afterPack": "scripts/after-pack.cjs",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "zr750104",
+        "repo": "pdf-studio",
+        "releaseType": "draft"
+      }
+    ],
+    "npmRebuild": false
+  }
+}

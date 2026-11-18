@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' app:; style-src 'self' app: 'unsafe-inline'; script-src 'self' app:">
+  <title>PDF Studio</title>
+  <link rel="stylesheet" href="tabs.css">
+  <script src="tabs.js" defer></script>
+</head>
+<body>
+  <div id="strip">
+    <div id="tablist" role="tablist"></div>
+    <button id="new-tab" class="icon-btn">+</button>
+    <div class="spacer"></div>
+    <button id="layout" class="icon-btn">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor"/><line x1="8" y1="2.5" x2="8" y2="13.5" stroke="currentColor"/></svg>
+    </button>
+  </div>
+  <div id="frames"></div>
+</body>
+</html>

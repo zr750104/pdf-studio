@@ -1,0 +1,17 @@
+# 共通
+.DS_Store
+.claude/
+
+# Windows 版（Electron）
+/windows/node_modules/
+/windows/.tools/
+/windows/dist/
+# scripts/vendor.js が node_modules から作る
+/windows/renderer/vendor/
+
+# Mac 版（Swift）
+/mac/.build/
+/mac/dist/
+/mac/PDF Studio.app/
+# build_app.sh が作る（AppIcon.iconset は make_icon.swift が作る）
+/mac/build/
