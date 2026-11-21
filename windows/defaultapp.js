@@ -68,7 +68,8 @@ function writeSettings(patch) {
 async function checkTiffDefault({ installed, log }) {
   if (process.platform !== 'win32') return;
   const results = EXTS.map((ext) => [ext, inspect(ext, log)]);
-  log('INFO', `tiff default: ${JSON.stringify(Object.fromEntries(results))}`);
+  // 開くコマンドにはアプリの場所（ユーザー名を含む）が入るので書かず、識別名と PDF Studio かどうかだけ
+  log('INFO', `tiff default: ${JSON.stringify(Object.fromEntries(results.map(([ext, r]) => [ext, r && { progId: r.progId, ours: r.ours }])))}`);
   if (!installed) return;
   // 読めなかった拡張子がある・すでに既定になっている場合は何もしない
   if (results.some(([, r]) => r == null) || results.every(([, r]) => r.ours)) return;

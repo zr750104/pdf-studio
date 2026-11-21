@@ -65,7 +65,7 @@ function getUpdater() {
   autoUpdater.autoDownload = false;
   // 終了時の自動インストールは無音（失敗しても何も表示されない）ため使わず、installAtQuit で画面付きで行う
   autoUpdater.autoInstallOnAppQuit = false;
-  log('INFO', `PDF Studio ${app.getVersion()} (${process.execPath})`);
+  log('INFO', `PDF Studio ${app.getVersion()} (${isInstalled() ? 'installed' : 'portable'})`); // 場所（ユーザー名を含む）は書かない
 
   autoUpdater.on('update-available', async (info) => {
     const settings = loadSettings();
@@ -413,7 +413,8 @@ async function checkDuplicateInstalls() {
   const here = path.dirname(process.execPath).toLowerCase();
   const all = findInstalls();
   const others = all.filter((x) => x.dir.toLowerCase() !== here);
-  log('INFO', `installs: ${JSON.stringify(all)}`);
+  // 場所（ユーザー名を含む）は書かず、版と「すべてのユーザー」かどうかだけ
+  log('INFO', `installs: ${JSON.stringify(all.map((x) => ({ version: x.version, allUsers: x.allUsers, here: x.dir.toLowerCase() === here })))}`);
   if (!others.length) return;
   const settings = loadSettings();
   const sig = others.map((x) => x.dir.toLowerCase()).sort().join('|');
@@ -431,6 +432,13 @@ async function checkDuplicateInstalls() {
 }
 
 /** 起動したことを記録する（起動直後に落ちるときの手がかり） */
-const logStartup = () => log('INFO', `start ${app.getVersion()} (${process.execPath}) args=${JSON.stringify(process.argv.slice(1))}`);
+// ログにはファイルの場所・ユーザー名を書かない（アプリの置き場所も、開いたファイルも）。
+// 起動オプション（-- で始まるもの）と、ファイルの数だけを書く
+const logStartup = () => {
+  const args = process.argv.slice(1);
+  const flags = args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]);
+  const files = args.filter((a) => !a.startsWith('-')).length;
+  log('INFO', `start ${app.getVersion()} (${isInstalled() ? 'installed' : 'portable'}) flags=${JSON.stringify(flags)} files=${files}`);
+};
 
 module.exports = { log, isInstalled, logStartup, checkForUpdates, startAutoCheck, installAtQuit, setUnsavedChecker, checkDuplicateInstalls, findInstalls, RELEASES_URL, logPath };

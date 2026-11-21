@@ -2,7 +2,7 @@
 import { startAutoTranslate, setLang, t } from './i18n.js';
 import { state, bus, hasDoc, undo, redo, setDirty, can, setBusyProbe } from './doc.js';
 import { initViewer, buildPages, view, setTool, zoomTo, scrollToPage, currentPage, stepPage, setLayout, select, removeObject, nudgeSelected, TOOLS, DEFAULT_TOOL, finishPoly, cancelPoly, undoPolyPoint, polyActive } from './viewer.js';
-import { initToolbar, initSidebar, initInspector, reloadSidebar, showSearchTab, updateZoomSelect, updateToolAvailability } from './panels.js';
+import { initToolbar, initSidebar, initInspector, reloadSidebar, showSearchTab, updateZoomSelect, updateToolAvailability, outlineAction } from './panels.js';
 import * as F from './features.js';
 import { batchProcess } from './batch.js';
 import { panelResizer } from './layout.js';
@@ -60,6 +60,9 @@ const ACTIONS = {
   unprotect: F.unprotect,
   compare: F.compare,
   'compare-overlay': () => F.compareOverlay(),
+  'normalize-size': F.normalizeSizeDialog,
+  // しおりの欄のボタン（ほかの操作と重ならないよう run を通す）
+  ...Object.fromEntries(['add', 'rename', 'delete', 'up', 'down', 'indent', 'outdent'].map((k) => [`outline-${k}`, () => outlineAction(k)])),
   'measure-scale': F.measureScale,
   calibrate: F.calibrate,
   properties: F.properties,

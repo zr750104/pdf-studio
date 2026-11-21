@@ -1,7 +1,8 @@
 // 自動テスト（`electron . --selftest`）。主要機能を UI 経由で操作し、結果とスクリーンショットを保存する
 import {
   state, PL, pdfjsLib, PDFJS_OPTS, openBytes, buildOutput, jpFont, pageText, undo, redo, changeStructure, insertFromSources,
-  rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib, setDirty
+  rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib, setDirty,
+  readOutline, editOutline, normalizePageSize, PAPER_SIZES
 } from './doc.js';
 import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, clampScale, MAX_SCALE, MIN_SCALE, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation } from './viewer.js';
 import { textStamp, hanko, chooseStamp } from './stamps.js';
@@ -1165,6 +1166,258 @@ async function tabTests() {
   await tab({ do: 'focus-self' });
 }
 
+// しおりの編集・ページの大きさをそろえる：保存して開き直しても、しおり・リンク・注釈・回転・文字が正しく残る
+async function pageEditTests() {
+  const { PDFDocument, PDFName, PDFString, StandardFonts, degrees } = PL;
+  const d = await PDFDocument.create();
+  const font = await d.embedFont(StandardFonts.Helvetica);
+  const p1 = d.addPage([841.89, 1190.55]); // A3 縦
+  p1.drawText('HELLO A3', { x: 100, y: 1000, size: 30, font });
+  const p2 = d.addPage([792, 612]); // Letter 横、表示は 90° 回転
+  p2.setRotation(degrees(90));
+  p2.drawText('PAGE TWO', { x: 100, y: 300, size: 30, font });
+  const p3 = d.addPage([595.28, 841.89]); // A4 縦だが、表示範囲（トリミング）は小さい
+  p3.drawText('PAGE THREE', { x: 100, y: 600, size: 30, font });
+  p3.setCropBox(0, 0, 500, 700);
+  const p4 = d.addPage([595.28, 841.89]); // A4 縦（そのまま）
+  const ctx = d.context;
+  // 1 ページ目の中身を「配列への参照」の形にする（この形で中身が消えないこと）
+  const c1 = p1.node.get(PDFName.of('Contents'));
+  p1.node.set(PDFName.of('Contents'), ctx.register(ctx.obj(c1 instanceof PL.PDFArray ? c1.asArray() : [c1])));
+  // 名前で指定した移動先（/Dests）と、入れ子のしおり
+  d.catalog.set(PDFName.of('Dests'), ctx.obj({ chap2: [p2.ref, PDFName.of('Fit')] }));
+  const root = ctx.nextRef(), o1 = ctx.nextRef(), o2 = ctx.nextRef(), o21 = ctx.nextRef();
+  // 色・太字、閉じた状態（Count が負）も残ること
+  // しおりとリンクが同じ移動先（間接参照の配列）を共有する。名前の木（/Names /Dests）の移動先も置く
+  const shared = ctx.register(ctx.obj([p1.ref, PDFName.of('XYZ'), 0, 1190, null]));
+  // （名前の木があると pdf.js はそちらを先に見るので、chap2 も入れる。名前の順に並べる）
+  d.catalog.set(PDFName.of('Names'), ctx.obj({ Dests: ctx.obj({ Names: [PDFString.of('chap2'), ctx.obj([p2.ref, PDFName.of('Fit')]), PDFString.of('treeDest'), ctx.obj([p1.ref, PDFName.of('XYZ'), 0, 1000, null])] }) }));
+  ctx.assign(o1, ctx.obj({ Title: PDFString.of('Chapter 1'), Parent: root, Next: o2, Dest: shared, C: [1, 0, 0], F: 2 }));
+  ctx.assign(o2, ctx.obj({ Title: PDFString.of('Chapter 2'), Parent: root, Prev: o1, Dest: PDFString.of('chap2'), First: o21, Last: o21, Count: -1 }));
+  ctx.assign(o21, ctx.obj({ Title: PDFString.of('Section 2.1'), Parent: o2, Dest: [p3.ref, PDFName.of('Fit')] }));
+  ctx.assign(root, ctx.obj({ Type: 'Outlines', First: o1, Last: o2, Count: 2 }));
+  d.catalog.set(PDFName.of('Outlines'), root);
+  // リンク（1 ページ目 → 3 ページ目）
+  const link = ctx.register(ctx.obj({ Type: 'Annot', Subtype: 'Link', Rect: [100, 100, 300, 160], Border: [0, 0, 0], Dest: shared }));
+  p1.node.set(PDFName.of('Annots'), ctx.obj([link]));
+  await openBytes(await d.save(), { name: 'edit-test.pdf', askPassword: async () => null });
+  await ready();
+  // このアプリの注釈（1 ページ目）
+  addObject(0, { type: 'ink', strokes: [[[200, 500], [400, 500]]], rect: [198, 498, 204, 4], color: '#000', width: 2, opacity: 1 });
+
+  // しおりの読み取り（名前で指定した移動先もページに直す）
+  let ol = await readOutline();
+  check(ol.length === 2 && ol[0].page === 0 && ol[1].page === 1 && ol[1].items[0]?.title === 'Section 2.1' && ol[1].items[0].page === 2,
+    `しおり：入れ子・名前で指定した移動先を読む (${JSON.stringify(ol.map((x) => [x.title, x.page, x.items.map((y) => [y.title, y.page])]))})`);
+  // 追加・名前の変更・並べ替え・字下げ
+  await editOutline((items) => { items.push({ title: 'Appendix', page: 2, pos: ['Fit'], url: null, items: [] }); });
+  await editOutline((items) => { items[0].title = 'Chapter One'; });
+  await editOutline((items) => { const [a] = items.splice(2, 1); items[1].items.push(a); }); // Appendix を Chapter 2 の中へ
+  ol = await readOutline();
+  check(ol.map((x) => x.title).join() === 'Chapter One,Chapter 2' && ol[1].items.map((x) => `${x.title}:${x.page}`).join() === 'Section 2.1:2,Appendix:2',
+    `しおり：追加・名前の変更・入れ子にする (${JSON.stringify(ol.map((x) => [x.title, x.items.map((y) => y.title)]))})`);
+  await undo();
+  ol = await readOutline();
+  check(ol.length === 3 && ol[2].title === 'Appendix', `しおり：元に戻せる (${ol.map((x) => x.title).join()})`);
+  await redo();
+  // しおりの欄：編集のボタンが並び、選んで「下へ」で並べ替えられる
+  {
+    const P = await import('./panels.js');
+    await sleep(500);
+    const tools = document.querySelectorAll('#outline .outline-tools button').length;
+    const rows = () => [...document.querySelectorAll('#outline .outline-item')].map((e) => e.textContent);
+    const first = document.querySelector('#outline .outline-item');
+    first?.click();
+    await P.outlineAction('down');
+    await sleep(500);
+    check(tools === 7 && rows().slice(0, 2).join() === 'Chapter 2,Section 2.1', `しおり：欄のボタンで並べ替える (ボタン ${tools}, ${rows().join(' / ')})`);
+    await undo();
+    await sleep(300);
+  }
+
+  // ページの大きさをそろえる（A4）
+  const res = await normalizePageSize([0, 1, 2, 3], [595.28, 841.89]);
+  check(res.changed === 3, `ページの大きさをそろえる：大きさの違うページだけ変える（トリミングしたページは表示範囲で判断） (${res.changed} ページ)`);
+  const saved = await buildOutput();
+  // 保存したものを開き直して確かめる
+  const re = await PDFDocument.load(saved);
+  const sizes = re.getPages().map((p) => { const mb = p.getMediaBox(); return `${Math.round(mb.width)}x${Math.round(mb.height)}r${p.getRotation().angle}`; });
+  check(sizes.join() === '595x842r0,842x595r90,595x842r0,595x842r0', `ページの大きさをそろえる：縦横の向き・回転を保って A4 に (${sizes.join(', ')})`);
+  const cb3 = re.getPage(2).getCropBox();
+  check(Math.round(cb3.width) === 595 && Math.round(cb3.height) === 842, `ページの大きさをそろえる：トリミングしたページも見える範囲が A4 になる (${Math.round(cb3.width)}x${Math.round(cb3.height)})`);
+  // 古いしおりの名前がファイルに残らない
+  const oldTitle = [...re.context.enumerateIndirectObjects()].some(([, o]) => o instanceof PL.PDFDict && o.lookup(PDFName.of('Title'))?.decodeText?.() === 'Chapter 1');
+  check(!oldTitle, '保存して開き直す：名前を変える前のしおりがファイルに残らない');
+  const k = 595.28 / 841.89;
+  const lr = re.getPage(0).node.Annots()?.asArray().map((r) => re.context.lookup(r)).find((a) => a.lookup(PDFName.of('Subtype'))?.asString() === '/Link')?.lookup(PDFName.of('Rect'))?.asArray().map((n) => n.asNumber());
+  check(lr && Math.abs(lr[0] - 100 * k) < 1 && Math.abs(lr[2] - 300 * k) < 1, `ページの大きさをそろえる：リンクの位置も一緒に動く (${lr?.map((v) => v.toFixed(1)).join(', ')})`);
+  const pj = await pdfjsLib.getDocument({ data: saved.slice(), ...PDFJS_OPTS }).promise;
+  const tc = await (await pj.getPage(1)).getTextContent();
+  const txt = tc.items.map((x) => x.str).join('');
+  const hx = tc.items.find((x) => x.str.includes('HELLO'))?.transform?.[4];
+  const reOl = await readOutline(pj);
+  check(txt.includes('HELLO A3') && Math.abs(hx - 100 * k) < 1, `ページの大きさをそろえる：中身が配列への参照のページも、文字が残り同じだけ縮む (${txt.slice(0, 20)}, x=${hx?.toFixed(1)})`);
+  const rawOl = await pj.getOutline();
+  check(rawOl[0].bold && rawOl[0].color?.[0] === 255 && rawOl[1].dest === 'chap2' && rawOl[1].count < 0,
+    `保存して開き直す：しおりの色・太字・閉じた状態・名前の移動先が残る (${JSON.stringify(rawOl.map((x) => ({ b: x.bold, c: x.color && [...x.color], d: x.dest, n: x.count })))})`);
+  check(Math.abs((reOl[0].pos?.[2] ?? 0) - 1190 * k) < 1, `ページの大きさをそろえる：しおりの移動先の位置も一緒に縮む（リンクと共有していても 1 回だけ） (${reOl[0].pos?.[2]?.toFixed(1)})`);
+  const td = await pj.getDestination('treeDest');
+  check(td && Math.abs(td[3] - 1000 * k) < 1, `ページの大きさをそろえる：名前の木の移動先の位置も縮む (${td?.[3]?.toFixed?.(1)})`);
+  check(reOl.map((x) => `${x.title}:${x.page}`).join() === 'Chapter One:0,Chapter 2:1' && reOl[1].items.map((x) => `${x.title}:${x.page}`).join() === 'Section 2.1:2,Appendix:2',
+    `保存して開き直す：しおりの移動先が残る (${JSON.stringify(reOl.map((x) => [x.title, x.page, x.items.map((y) => [y.title, y.page])]))})`);
+  pj.destroy();
+  await openBytes(saved, { name: 'edit-test-saved.pdf', askPassword: async () => null });
+  await ready();
+  const ink = objs(0).find((o) => o.type === 'ink');
+  check(ink && Math.abs(ink.strokes[0][0][0] - (200 * k)) < 1 && Math.abs(ink.width - 2 * k) < 0.05, `保存して開き直す：注釈の位置と太さも一緒に縮む (${ink?.strokes[0][0].map((v) => v.toFixed(1))}, 太さ ${ink?.width?.toFixed(2)})`);
+  await undo(); // 開き直した文書には取り消しはない（何も起きない）
+
+  // 大きさを変えたページで、墨消し・焼き込みが正しく効く（墨消しした文字がファイルに残らない）
+  {
+    const base = await d.save();
+    await openBytes(base, { name: 'redact-test.pdf', askPassword: async () => null });
+    await ready();
+    await normalizePageSize([0, 1, 2, 3], [595.28, 841.89]);
+    await ready();
+    // 対照：墨消しの前は、部品（Form XObject）の中の文字もファイルの中から見つかる（検索が中まで見ていることの確認）
+    check(await rawContains(await buildOutput(), 'HELLO'), '大きさを変えたページ：墨消しの前は文字がファイルの中から見つかる（検索の確認）');
+    addObject(0, { type: 'redact', rect: [50, 680, 260, 60] }); // HELLO A3（縮めたあと x≈71, y≈707）
+    answer({});
+    await F.applyRedactions();
+    await ready();
+    const red = await buildOutput();
+    check(!(await rawContains(red, 'HELLO')), '大きさを変えたページ：墨消しした文字がファイルに残らない');
+    addObject(1, { type: 'rect', rect: [100, 100, 80, 40], color: '#ff0000', width: 2 });
+    answer({});
+    await F.flatten();
+    await ready();
+    const flat = await buildOutput();
+    const pjf = await pdfjsLib.getDocument({ data: flat.slice(), ...PDFJS_OPTS }).promise;
+    const t2 = (await (await pjf.getPage(2)).getTextContent()).items.map((x) => x.str).join('');
+    check(t2.includes('PAGE TWO'), `大きさを変えたページ：焼き込みのあとも中身が残る (${t2.slice(0, 20)})`);
+    pjf.destroy();
+  }
+
+  // 入力画面から操作する（用紙 A5、すべてのページ）
+  {
+    await openBytes(await d.save(), { name: 'dialog-test.pdf', askPassword: async () => null });
+    await ready();
+    window.__askQueue = [];
+    answer({ size: Object.keys(PAPER_SIZES).indexOf('A5'), range: '', shrink: false });
+    answer({}); // 終わったあとのお知らせ（出た場合）
+    await F.normalizeSizeDialog();
+    await ready();
+    const mbs = state.lib.getPages().map((p) => { const b = p.getMediaBox(); return `${Math.round(b.width)}x${Math.round(b.height)}`; });
+    check(mbs.join() === '420x595,595x420,420x595,420x595', `ページの大きさをそろえる：入力画面から A5 にそろえる (${mbs.join(', ')})`);
+    window.__askQueue = [];
+  }
+
+  // しおりの欄から追加・名前の変更・削除
+  {
+    const P = await import('./panels.js');
+    const rowsNow = () => [...document.querySelectorAll('#outline .outline-item')].map((e) => e.textContent);
+    await sleep(500);
+    answer({ v: 'New Mark' });
+    await P.outlineAction('add');
+    await sleep(500);
+    const afterAdd = rowsNow();
+    [...document.querySelectorAll('#outline .outline-item')].find((e) => e.textContent === 'New Mark')?.click();
+    answer({ v: 'Renamed Mark' });
+    await P.outlineAction('rename');
+    await sleep(500);
+    const afterRename = rowsNow();
+    [...document.querySelectorAll('#outline .outline-item')].find((e) => e.textContent === 'Renamed Mark')?.click();
+    await P.outlineAction('delete');
+    await sleep(500);
+    const afterDelete = rowsNow();
+    check(afterAdd.includes('New Mark') && afterRename.includes('Renamed Mark') && !afterRename.includes('New Mark') && !afterDelete.includes('Renamed Mark'),
+      `しおり：欄から追加・名前の変更・削除 (${afterAdd.length} → ${afterRename.length} → ${afterDelete.length})`);
+    window.__askQueue = [];
+  }
+
+  // しおりのない文書で、実際の「＋」ボタンから最初のしおりを作り、「名前」ボタンで変える（メニューと同じ処理中の仕組みを通る）
+  {
+    await openBytes(await makeSample(), { name: 'no-outline.pdf', askPassword: async () => null });
+    await ready();
+    scrollToPage(1, false);
+    await sleep(600);
+    const until = async (fn, ms = 6000) => { const t0 = performance.now(); while (performance.now() - t0 < ms) { if (fn()) return true; await sleep(100); } return false; };
+    const btn = (label) => [...document.querySelectorAll('#outline .outline-tools button')].find((b) => b.textContent === label);
+    window.__askQueue = [];
+    answer({ v: 'First Mark' });
+    btn('＋')?.click();
+    const made = await until(() => [...document.querySelectorAll('#outline .outline-item')].some((e) => e.textContent === 'First Mark'));
+    [...document.querySelectorAll('#outline .outline-item')].find((e) => e.textContent === 'First Mark')?.click();
+    answer({ v: 'Renamed First' });
+    btn(tr('名前'))?.click();
+    const renamed = await until(() => [...document.querySelectorAll('#outline .outline-item')].some((e) => e.textContent === 'Renamed First'));
+    const savedB = await buildOutput();
+    const pjb = await pdfjsLib.getDocument({ data: savedB.slice(), ...PDFJS_OPTS }).promise;
+    const olb = await readOutline(pjb);
+    pjb.destroy();
+    check(made && renamed && olb.length === 1 && olb[0].title === 'Renamed First' && olb[0].page === 1,
+      `しおり：しおりのない文書で、ボタンから最初のしおりを作って名前を変え、保存しても残る (${JSON.stringify(olb.map((x) => [x.title, x.page]))})`);
+    window.__askQueue = [];
+  }
+
+  // 読み取れないしおりがある文書では、書き換えない（元のしおりを壊さない）
+  {
+    const bad = await PDFDocument.create();
+    const bp = bad.addPage([300, 300]);
+    const bctx = bad.context;
+    // 正しいしおりの間に、Title が文字でない（pdf.js が読めない）しおりを挟む
+    const broot = bctx.nextRef(), ba = bctx.nextRef(), bi = bctx.nextRef(), bc = bctx.nextRef();
+    bctx.assign(ba, bctx.obj({ Title: PDFString.of('Good A'), Parent: broot, Next: bi, Dest: [bp.ref, PDFName.of('Fit')] }));
+    bctx.assign(bi, bctx.obj({ Title: 123, Parent: broot, Prev: ba, Next: bc, Dest: [bp.ref, PDFName.of('Fit')] })); // Title が数字
+    bctx.assign(bc, bctx.obj({ Title: PDFString.of('Good C'), Parent: broot, Prev: bi, Dest: [bp.ref, PDFName.of('Fit')] }));
+    bctx.assign(broot, bctx.obj({ Type: 'Outlines', First: ba, Last: bc, Count: 3 }));
+    bad.catalog.set(PDFName.of('Outlines'), broot);
+    await openBytes(await bad.save(), { name: 'bad-outline.pdf', askPassword: async () => null });
+    await ready();
+    // pdf.js が読めたしおりは引き継げる。読めなかった場合（読み取りの結果が空・数が合わない）を作って、書き換えを断ることを確かめる
+    const readable = await readOutline();
+    const orig = state.pdf.getOutline.bind(state.pdf);
+    state.pdf.getOutline = async () => null;
+    const items = await readOutline();
+    let refused = false;
+    try { await editOutline((list) => { list.push({ title: 'X', page: 0, pos: ['Fit'], url: null, items: [] }); }); } catch { refused = true; }
+    state.pdf.getOutline = orig;
+    const still = state.lib.catalog.get(PDFName.of('Outlines'));
+    check(!readable.unmatched && items.unmatched && refused && still === broot && !state.dirty,
+      `しおり：しおりを正しく読めない文書では書き換えない (読めたとき ${readable.length} 件で対応 ${!readable.unmatched}, 読めないとき断った ${refused}, 元のまま ${still === broot})`);
+  }
+
+  // ほかのアプリで作った PDF（HTML から変換したもの）も、文字が残り同じだけ縮む
+  {
+    const enc = (x) => new TextEncoder().encode(x);
+    const hb = await window.api.convertToPdf({ bytes: enc('<h1>HTML TITLE</h1><p>body text</p>'), name: 'page.html' });
+    await openBytes(new Uint8Array(hb), { name: 'html.pdf', askPassword: async () => null });
+    await ready();
+    const xOf = async (bytes) => { const pj2 = await pdfjsLib.getDocument({ data: bytes.slice(), ...PDFJS_OPTS }).promise; const it = (await (await pj2.getPage(1)).getTextContent()).items.find((x) => x.str.includes('HTML')); pj2.destroy(); return it?.transform; };
+    const before = await xOf(await buildOutput());
+    await normalizePageSize([0], PAPER_SIZES.A5);
+    await ready();
+    const after = await xOf(await buildOutput());
+    const kk = PAPER_SIZES.A5[0] / PAPER_SIZES.A4[0];
+    check(before && after && Math.abs(after[4] - before[4] * kk) < 1.5, `ページの大きさをそろえる：ほかのアプリの PDF も文字が残り同じだけ縮む (x ${before?.[4]?.toFixed(1)} → ${after?.[4]?.toFixed(1)}, 期待 ${(before?.[4] * kk).toFixed(1)})`);
+  }
+
+  // スキャン画像だけのページ：縦横比が同じなら、速い表示の条件を保ったまま縮める
+  const Sp = await import('./scanpages.js');
+  await F.openHere(new Uint8Array(await (await fetch('app://local/test/fixtures/fax_g4.tif')).arrayBuffer()), null, 'scan.tif');
+  await ready();
+  const mb0 = state.lib.getPage(0).getMediaBox();
+  const before = !!Sp.scanInfo(0);
+  const r2 = await normalizePageSize([0], [mb0.width * 0.8, mb0.height * 0.8]);
+  await ready();
+  const mb1 = state.lib.getPage(0).getMediaBox();
+  check(before && r2.changed === 1 && !!Sp.scanInfo(0) && Math.abs(mb1.width - mb0.width * 0.8) < 1,
+    `ページの大きさをそろえる：スキャン画像のページは速い表示のまま (${before} → ${!!Sp.scanInfo(0)}, ${Math.round(mb0.width)} → ${Math.round(mb1.width)})`);
+  await undo();
+  await ready();
+  check(Math.abs(state.lib.getPage(0).getMediaBox().width - mb0.width) < 1 && !!Sp.scanInfo(0), 'ページの大きさをそろえる：元に戻せる');
+}
+
 // 図面の重ね合わせ比較：ずれを見つけて合わせ、足した線だけを「新しい版だけ」として色分けする
 async function overlayTests() {
   const drawing = async (shift, extra) => {
@@ -1505,10 +1758,12 @@ export async function run() {
     if (only === 'scan') { await scanFastTests(); throw new Error('__only__'); }
     if (only === 'session') { await sessionTests(out); throw new Error('__only__'); }
     if (only === 'overlay') { await overlayTests(); throw new Error('__only__'); }
+    if (only === 'pageedit') { await pageEditTests(); throw new Error('__only__'); }
     await layoutTests();
     await tabTests();
     await sessionTests(out);
     await overlayTests();
+    await pageEditTests();
     await rotationTests();
     await measureTests();
     await tiffTests();

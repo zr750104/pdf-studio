@@ -3,7 +3,7 @@ import {
   state, bus, PL, pdfjsLib, PDFJS_OPTS, hasDoc, pageCount, openBytes, newBlankDocument, buildOutput, changeStructure, setDirty, can, loadLib,
   rotatePages, deletePages, movePages, duplicatePages, insertBlank, insertFromSources, replaceWithImage,
   withDisplaySpace, addInvisibleText, jpFont, textFont, THAI, pageText, hexToRgb, setMetadata, objBounds,
-  UNITS, scaleFactor, setMeasureScale, measureValue
+  UNITS, scaleFactor, setMeasureScale, measureValue, normalizePageSize, PAPER_SIZES
 } from './doc.js';
 import { scrollToPage, currentPage, select, setTool, currentScale, startCalibration } from './viewer.js';
 import { ask, alertBox, confirmBox, toast, progress, parseRange, compactRange, canvasToBytes, baseName, formatBytes, el } from './util.js';
@@ -1033,6 +1033,33 @@ export async function finishCalibration({ points }) {
   const decimals = Math.min(4, Math.max(0, Math.round(r.decimals || 0)));
   const changed = setMeasureScale({ factor: scaleFactor(ratio, unit), unit, label: `1:${nice}`, ratio, decimals }, r.all);
   toast(`縮尺を 1:${nice} に合わせました${changed ? `（${changed} 件の測定を更新）` : ''}`, 3500);
+}
+
+// ---------------------------------------------------------------- ページの大きさをそろえる
+
+export async function normalizeSizeDialog() {
+  if (!requireDoc() || !allowed('modify')) return;
+  const names = Object.keys(PAPER_SIZES);
+  const r = await ask({ title: 'ページの大きさをそろえる', message: '縦横の向きはページごとに元のまま、縦横比を保って中央に収めます。注釈やリンクも一緒に動かします。', fields: [
+    { key: 'size', label: '用紙', type: 'select', options: names, value: 1 },
+    { key: 'range', label: 'ページ範囲', placeholder: '空欄ですべて' },
+    { key: 'shrink', label: '大きいページだけ縮める（小さいページは拡大しない）', type: 'checkbox', value: false }] });
+  if (!r) return;
+  const idx = parseRange(r.range, pageCount());
+  if (!idx.length) return toast('ページ範囲が正しくありません');
+  try {
+    const res = await normalizePageSize(idx, PAPER_SIZES[names[r.size]], { shrinkOnly: !!r.shrink });
+    if (res.skipped) await alertBox('一部のページは変えていません', t('{n} ページは大判の図面の単位（UserUnit）で作られているため、大きさを変えていません。').replace('{n}', res.skipped));
+    if (!res.changed) return toast('大きさを変えるページはありませんでした');
+    toast(t('{n} ページの大きさを {s} にそろえました').replace('{n}', res.changed).replace('{s}', names[r.size]), 4000);
+    const notes = [];
+    // 測った長さは実寸のまま直したが、これから測るときの縮尺は大きさを変える前のもの
+    if (state.measureScale || Object.values(state.objects).flat().some((o) => o.type === 'measure')) notes.push(t('これまでの測定の注釈は実寸のまま直しました。これから測るときは、大きさを変えたページで縮尺を合わせ直してください（「文書 > 縮尺を合わせる」）。'));
+    if (res.scanSlow) notes.push(t('{n} ページはスキャン画像と用紙の縦横比が違うため、保存すると表示が遅くなります（速い表示の対象から外れます）。').replace('{n}', res.scanSlow));
+    if (notes.length) await alertBox('ページの大きさをそろえました', notes.join('\n\n'));
+  } catch (e) {
+    await alertBox('ページの大きさを変えられませんでした', e.message);
+  }
 }
 
 // ---------------------------------------------------------------- 図面の重ね合わせ比較

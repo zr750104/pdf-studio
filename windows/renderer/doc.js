@@ -101,6 +101,352 @@ function scheduleRecovery(delayOverride = null) {
   }, delay);
 }
 
+// ---------------------------------------------------------------- ページの大きさをそろえる
+
+export const PAPER_SIZES = {
+  A3: [841.89, 1190.55], A4: [595.28, 841.89], A5: [419.53, 595.28],
+  'B4 (JIS)': [728.5, 1031.81], 'B5 (JIS)': [515.91, 728.5],
+  Letter: [612, 792], Legal: [612, 1008], Tabloid: [792, 1224]
+};
+
+/** 注釈（このアプリのもの）を、p → p*k + (tx, ty) で動かした複製。測定の縮尺は実寸が変わらないように直す */
+function scaleObject(o, k, tx, ty) {
+  const P = ([x, y]) => [x * k + tx, y * k + ty];
+  const R = ([x, y, w, h]) => [x * k + tx, y * k + ty, w * k, h * k];
+  const c = { ...o };
+  if (Array.isArray(o.rect)) c.rect = R(o.rect);
+  if (Array.isArray(o.points)) c.points = o.points.map(P);
+  if (Array.isArray(o.strokes)) c.strokes = o.strokes.map((s) => s.map(P));
+  if (Array.isArray(o.quads)) c.quads = o.quads.map((q) => (q.length === 4 ? R(q) : q));
+  if (typeof o.width === 'number') c.width = o.width * k;
+  if (typeof o.fontSize === 'number') c.fontSize = o.fontSize * k;
+  if (o.scale && typeof o.scale.factor === 'number') c.scale = { ...o.scale, factor: o.scale.factor / k };
+  return c;
+}
+
+/** PDF の注釈（リンク・フォームなど）の位置を動かす */
+function scaleLibAnnots(page, k, tx, ty, done = new Set()) {
+  const annots = page.node.Annots();
+  if (!annots) return;
+  const ctx = page.doc.context;
+  const num = (v) => (v instanceof PDFNumber ? v.asNumber() : 0);
+  const mapPts = (arr) => arr.asArray().map((v, i) => num(ctx.lookup(v)) * k + (i % 2 ? ty : tx));
+  for (let i = 0; i < annots.size(); i++) {
+    const a = annots.lookup(i);
+    if (!(a instanceof PDFDict) || done.has(a)) continue; // 2 つのページで共有している注釈は 1 回だけ
+    done.add(a);
+    const set = (key, vals) => a.set(PDFName.of(key), ctx.obj(vals));
+    const rect = a.lookup(PDFName.of('Rect'));
+    if (rect instanceof PDFArray && rect.size() === 4) set('Rect', mapPts(rect));
+    for (const key of ['QuadPoints', 'L', 'Vertices']) { const v = a.lookup(PDFName.of(key)); if (v instanceof PDFArray) set(key, mapPts(v)); }
+    const ink = a.lookup(PDFName.of('InkList'));
+    if (ink instanceof PDFArray) a.set(PDFName.of('InkList'), ctx.obj(ink.asArray().map((s) => { const arr = ctx.lookup(s); return arr instanceof PDFArray ? mapPts(arr) : []; })));
+  }
+}
+
+/**
+ * 移動先（しおり・リンク・名前の移動先）の座標を、大きさを変えたページに合わせて直す。
+ * maps：ページの ref → { k, tx, ty }
+ */
+function scaleDestinations(lib, maps) {
+  const ctx = lib.context;
+  const done = new Set(); // しおりとリンクが同じ移動先を共有していても 1 回だけ直す
+  const fixDest = (d) => {
+    const arr = ctx.lookup(d);
+    if (!(arr instanceof PDFArray) || arr.size() < 2 || done.has(arr)) return;
+    done.add(arr);
+    const m = maps.get(arr.get(0));
+    if (!m) return;
+    const kind = arr.lookup(1)?.asString?.();
+    const v = (i) => { const n = arr.lookup(i); return n instanceof PDFNumber ? n.asNumber() : null; };
+    const X = (x) => (x == null ? null : x * m.k + m.tx), Y = (y) => (y == null ? null : y * m.k + m.ty);
+    const setN = (i, val) => arr.set(i, val == null ? PL.PDFNull : PDFNumber.of(val));
+    if (kind === '/XYZ') { setN(2, X(v(2))); setN(3, Y(v(3))); }
+    else if (kind === '/FitH' || kind === '/FitBH') setN(2, Y(v(2)));
+    else if (kind === '/FitV' || kind === '/FitBV') setN(2, X(v(2)));
+    else if (kind === '/FitR') { setN(2, X(v(2))); setN(3, Y(v(3))); setN(4, X(v(4))); setN(5, Y(v(5))); }
+  };
+  // 移動先を持つもの（Dest か、GoTo の A の D）
+  const fixHolder = (dict) => {
+    if (!(dict instanceof PDFDict)) return;
+    const dest = dict.get(PDFName.of('Dest'));
+    if (dest) fixDest(dest);
+    const a = dict.lookup(PDFName.of('A'));
+    if (a instanceof PDFDict && a.lookup(PDFName.of('S'))?.asString?.() === '/GoTo') { const d = a.get(PDFName.of('D')); if (d) fixDest(d); }
+  };
+  for (const page of lib.getPages()) {
+    const annots = page.node.Annots();
+    if (annots) for (let i = 0; i < annots.size(); i++) fixHolder(annots.lookup(i));
+  }
+  const outlines = lib.catalog.lookup(PDFName.of('Outlines'));
+  const walk = (ref, guard = new Set()) => {
+    for (let r = ref; r && !guard.has(r); ) {
+      guard.add(r);
+      const it = ctx.lookup(r);
+      if (!(it instanceof PDFDict)) break;
+      fixHolder(it);
+      walk(it.get(PDFName.of('First')), guard);
+      r = it.get(PDFName.of('Next'));
+    }
+  };
+  if (outlines instanceof PDFDict) walk(outlines.get(PDFName.of('First')));
+  // 名前の移動先：古い形式（カタログの /Dests）と、名前の木（/Names の /Dests。Word などが使う）
+  const fixNamed = (v) => {
+    const o = ctx.lookup(v);
+    if (o instanceof PDFDict) { const d = o.get(PDFName.of('D')); if (d) fixDest(d); } else fixDest(v);
+  };
+  const dests = lib.catalog.lookup(PDFName.of('Dests'));
+  if (dests instanceof PDFDict) for (const [, v] of dests.entries()) fixNamed(v);
+  const names = lib.catalog.lookup(PDFName.of('Names'));
+  const tree = names instanceof PDFDict ? names.lookup(PDFName.of('Dests')) : null;
+  const seen = new Set();
+  const walkNames = (node, depth = 0) => {
+    if (!(node instanceof PDFDict) || seen.has(node) || depth > 32) return;
+    seen.add(node);
+    const list = node.lookup(PDFName.of('Names'));
+    if (list instanceof PDFArray) for (let i = 1; i < list.size(); i += 2) fixNamed(list.get(i));
+    const kids = node.lookup(PDFName.of('Kids'));
+    if (kids instanceof PDFArray) for (let i = 0; i < kids.size(); i++) walkNames(kids.lookup(i), depth + 1);
+  };
+  walkNames(tree);
+}
+
+/** ページの中身が「全面に画像 1 枚だけ」なら、その画像の名前（速い表示の対象になるページ） */
+function fullPageImageName(lib, page) {
+  try {
+    const contents = page.node.Contents();
+    if (!contents) return null;
+    const parts = contents instanceof PDFArray ? contents.asArray().map((r) => lib.context.lookup(r)) : [contents];
+    if (parts.length > 4) return null;
+    let text = '';
+    for (const s of parts) {
+      if (!(s instanceof PL.PDFRawStream) || s.contents.length > 2048) return null;
+      text += new TextDecoder('latin1').decode(PL.decodePDFRawStream(s).decode()) + '\n';
+    }
+    const m = text.match(/^\s*q\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+cm\s*\/([^\s/[\]()<>{}%]+)\s*Do\s+Q\s*$/);
+    if (!m) return null;
+    const [a, b, c, d, e, f] = m.slice(1, 7).map(Number);
+    const mb = page.getMediaBox(), cb = page.getCropBox();
+    const near = (u, v) => Math.abs(u - v) < 0.02;
+    if (!near(mb.x, cb.x) || !near(mb.y, cb.y) || !near(mb.width, cb.width) || !near(mb.height, cb.height)) return null;
+    return near(a, mb.width) && near(b, 0) && near(c, 0) && near(d, mb.height) && near(e, mb.x) && near(f, mb.y) ? m[7] : null;
+  } catch {
+    return null; // 読めない中身は通常の方法で
+  }
+}
+
+/** そろえる先の大きさ（ページの見えている枠の縦横に合わせる） */
+const targetFor = (box, target) => (box.width > box.height ? [Math.max(...target), Math.min(...target)] : [Math.min(...target), Math.max(...target)]);
+/** ページの見えている枠（トリミングした範囲。親から引き継いだものも含む）と /UserUnit */
+const visibleBox = (page) => page.getCropBox();
+const userUnit = (page) => { const u = page.node.lookup(PDFName.of('UserUnit')); return u instanceof PDFNumber ? u.asNumber() : 1; };
+
+/**
+ * ページの大きさをそろえる。indices のページを target（[幅, 高さ] pt）に、縦横はページごとに元の向きに合わせ、
+ * 縦横比を保って中央に収める（見えている枠＝トリミングした範囲が基準）。注釈（このアプリのもの・PDF のリンクやフォーム）と、
+ * しおり・リンクの移動先の座標も一緒に動かす。shrinkOnly：大きいページだけ縮める。
+ * /UserUnit のあるページ（大判の図面の一部）は変えない。戻り値：{ changed, skipped }
+ */
+export async function normalizePageSize(indices, target, { shrinkOnly = false } = {}) {
+  let changed = 0, skipped = 0, scanSlow = 0;
+  const need = (page) => {
+    if (userUnit(page) !== 1) return false;
+    const box = visibleBox(page);
+    const [W, H] = targetFor(box, target);
+    const mb = page.getMediaBox();
+    const same = Math.abs(box.width - W) < 1 && Math.abs(box.height - H) < 1 && Math.abs(mb.width - W) < 1 && Math.abs(mb.height - H) < 1;
+    if (same) return false;
+    return !(shrinkOnly && Math.min(W / box.width, H / box.height) >= 1);
+  };
+  // 変えるページがなければ、読み込み直さずに終わる
+  if (!indices.some((i) => state.lib.getPage(i) && need(state.lib.getPage(i)))) return { changed: 0, skipped: indices.filter((i) => state.lib.getPage(i) && userUnit(state.lib.getPage(i)) !== 1).length, scanSlow: 0 };
+  await changeStructure(async (lib) => {
+    const pages = lib.getPages();
+    const maps = new Map();
+    const annotsDone = new Set();
+    for (const i of indices) {
+      const page = pages[i];
+      if (!page) continue;
+      if (userUnit(page) !== 1) { skipped++; continue; }
+      if (!need(page)) continue;
+      const box = visibleBox(page);
+      const [W, H] = targetFor(box, target);
+      const ctx = lib.context;
+      const imgName = fullPageImageName(lib, page);
+      const sameAspect = Math.abs((box.width / box.height) / (W / H) - 1) < 0.001;
+      let k, tx, ty;
+      if (imgName && sameAspect) {
+        // スキャン画像だけのページ（縦横比も同じ）：画像を新しいページ全面に置き直す（速い表示の条件をそのまま保つ）
+        k = W / box.width;
+        tx = -box.x * k; ty = -box.y * k;
+        page.node.set(PDFName.of('Contents'), ctx.register(ctx.stream(`q ${W} 0 0 ${H} 0 0 cm /${imgName} Do Q`)));
+      } else {
+        // 元の中身を 1 つの部品（Form XObject）にまとめ、縮めて中央に置く（中身の書き方に左右されない）
+        if (imgName) scanSlow++; // スキャン画像のページだが縦横比が違う：速い表示の対象から外れる
+        k = Math.min(W / box.width, H / box.height);
+        const ox = (W - box.width * k) / 2, oy = (H - box.height * k) / 2;
+        tx = ox - box.x * k; ty = oy - box.y * k;
+        // 中身のない（白紙の）ページは、まとめる中身がないので用紙と注釈だけを直す
+        const hasContents = (() => { const c = page.node.Contents(); return c && !(c instanceof PDFArray && c.size() === 0); })();
+        if (hasContents) {
+        const emb = await lib.embedPage(page, { left: box.x, bottom: box.y, right: box.x + box.width, top: box.y + box.height });
+        await emb.embed(); // 今の中身で部品を作る（保存のときに作ると、空にしたあとの中身になってしまう）
+        // ページの素材（Resources）は新しくし、部品だけを置く（部品が自分自身を素材に含んだり、
+        // 親から引き継いだ素材をほかのページと共有して書き換えたりしないように）
+        // （pdf-lib は Font・XObject・ExtGState の置き場所がそろっている前提）
+        page.node.set(PDFName.of('Resources'), ctx.obj({ Font: ctx.obj({}), XObject: ctx.obj({}), ExtGState: ctx.obj({}) }));
+        page.node.set(PDFName.of('Contents'), ctx.obj([]));
+        page.contentStream = undefined; page.contentStreamRef = undefined;
+        page.drawPage(emb, { x: ox, y: oy, xScale: k, yScale: k });
+        }
+      }
+      // 用紙を新しい大きさにし、表示範囲も同じに（親から引き継いだ表示範囲が残らないよう、ページ自身に書く）。ほかの枠は外す
+      for (const key of ['BleedBox', 'TrimBox', 'ArtBox']) page.node.delete(PDFName.of(key));
+      page.setMediaBox(0, 0, W, H);
+      page.setCropBox(0, 0, W, H);
+      scaleLibAnnots(page, k, tx, ty, annotsDone);
+      maps.set(page.ref, { k, tx, ty });
+      const pid = state.pageIds[i];
+      state.objects[pid] = (state.objects[pid] || []).map((o) => scaleObject(o, k, tx, ty));
+      changed++;
+    }
+    scaleDestinations(lib, maps);
+  });
+  return { changed, skipped, scanSlow };
+}
+
+// ---------------------------------------------------------------- しおり（アウトライン）の読み書き
+// しおりは { title, page（0 始まり。移動先がないときは null）, pos（['XYZ', x, y, zoom] など、移動先の表示位置）, url, items（子） } の木で扱う。
+// 名前で書かれた移動先も、どのページのどの位置かを読み取ってページで書き直す（同じ場所へ移動する）
+
+/** lib のしおりの辞書の参照を、木の形のまま集める */
+function outlineRefs(lib) {
+  const ctx = lib.context;
+  const root = lib.catalog.lookup(PDFName.of('Outlines'));
+  const guard = new Set();
+  const walk = (first) => {
+    const out = [];
+    for (let r = first; r instanceof PDFRef && !guard.has(r); ) {
+      guard.add(r);
+      const it = ctx.lookup(r);
+      if (!(it instanceof PDFDict)) break;
+      out.push({ ref: r, items: walk(it.get(PDFName.of('First'))) });
+      r = it.get(PDFName.of('Next'));
+    }
+    return out;
+  };
+  return { root: lib.catalog.get(PDFName.of('Outlines')), tree: root instanceof PDFDict ? walk(root.get(PDFName.of('First'))) : [] };
+}
+
+/**
+ * 今の文書のしおりを読む。pdf.js の読み取りに、lib の元の辞書（src）を対応づける
+ * （書き戻すとき、色・太字・閉じた状態・動作・名前の移動先などをそのまま写すため）
+ */
+export async function readOutline(pdf = state.pdf) {
+  const raw = (await pdf.getOutline().catch(() => null)) || [];
+  const conv = (list) => Promise.all(list.map(async (it) => {
+    let page = null, pos = null;
+    if (!it.url) {
+      try {
+        const dest = typeof it.dest === 'string' ? await pdf.getDestination(it.dest) : it.dest;
+        if (Array.isArray(dest) && dest[0] != null) {
+          page = typeof dest[0] === 'number' ? dest[0] : await pdf.getPageIndex(dest[0]);
+          pos = [dest[1]?.name || 'XYZ', ...dest.slice(2).map((v) => (typeof v === 'number' ? v : null))];
+        }
+      } catch { page = null; } // 消えたページを指していた・壊れた移動先
+    }
+    return {
+      title: String(it.title || ''), page, pos, url: it.url || null, items: await conv(it.items || []),
+      closed: typeof it.count === 'number' && it.count < 0, other: !it.url && page == null && !!(it.action || it.unsafeUrl || it.attachment), src: null
+    };
+  }));
+  const items = await conv(raw);
+  // 元の辞書を、同じ形（各段の数が同じ）のときだけ対応づける。
+  // 今の文書なのに lib と pdf.js がそろっていない（読み込み直しの途中）ときは、対応づけられなかった扱い
+  if (pdf === state.pdf && !(state.lib && state.libFor === state.pdf)) Object.defineProperty(items, 'unmatched', { value: true, enumerable: false });
+  if (pdf === state.pdf && state.lib && state.libFor === state.pdf) {
+    const { tree } = outlineRefs(state.lib);
+    const sameShape = (a, b) => a.length === b.length && a.every((x, i) => sameShape(x.items, b[i].items));
+    if (sameShape(items, tree)) {
+      const attach = (a, b) => a.forEach((x, i) => { x.src = b[i].ref; attach(x.items, b[i].items); });
+      attach(items, tree);
+    }
+    // 元のしおりがあるのに対応づけられなかった（読めないしおりがある）：書き換えると元の情報が消えるので印を付ける
+    Object.defineProperty(items, 'unmatched', { value: tree.length > 0 && !(items.length && items[0].src), enumerable: false });
+  }
+  return items;
+}
+
+/**
+ * しおりを lib に書く（今のしおりは置き換え、古いしおりの辞書は消す。空ならしおりを消す）。
+ * 元からあるしおり（src）は、名前と木の構造だけを書き換え、ほかの項目（移動先・動作・色・太字など）はそのまま写す
+ */
+export function writeOutline(lib, items) {
+  const ctx = lib.context;
+  const catalog = lib.catalog;
+  const old = outlineRefs(lib);
+  const oldRefs = [];
+  const collect = (list) => list.forEach((x) => { oldRefs.push(x.ref); collect(x.items); });
+  collect(old.tree);
+  const STRUCT = new Set(['/Title', '/Parent', '/Prev', '/Next', '/First', '/Last', '/Count']);
+  const pageRefs = lib.getPages().map((p) => p.ref);
+  const POS = new Set(['XYZ', 'Fit', 'FitH', 'FitV', 'FitR', 'FitB', 'FitBH', 'FitBV']);
+  let rootRef = null;
+  if (items.length) {
+    rootRef = ctx.nextRef();
+    const build = (list, parentRef) => {
+      const refs = list.map(() => ctx.nextRef());
+      let count = 0; // 開いた状態で見える数
+      list.forEach((it, i) => {
+        const d = ctx.obj({});
+        const src = it.src ? ctx.lookup(it.src) : null;
+        if (src instanceof PDFDict) {
+          for (const [k, v] of src.entries()) if (!STRUCT.has(k.asString())) d.set(k, v);
+        } else if (it.url) {
+          d.set(PDFName.of('A'), ctx.obj({ S: 'URI', URI: PDFString.of(it.url) }));
+        } else if (it.page != null && pageRefs[it.page]) {
+          const pos = Array.isArray(it.pos) && POS.has(it.pos[0]) ? it.pos : ['XYZ', null, null, null];
+          d.set(PDFName.of('Dest'), ctx.obj([pageRefs[it.page], PDFName.of(pos[0]), ...pos.slice(1).map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : null))]));
+        }
+        d.set(PDFName.of('Title'), PDFHexString.fromText(it.title || ''));
+        d.set(PDFName.of('Parent'), parentRef);
+        if (i > 0) d.set(PDFName.of('Prev'), refs[i - 1]);
+        if (i < list.length - 1) d.set(PDFName.of('Next'), refs[i + 1]);
+        let visible = 0;
+        if (it.items?.length) {
+          const sub = build(it.items, refs[i]);
+          d.set(PDFName.of('First'), sub.first);
+          d.set(PDFName.of('Last'), sub.last);
+          // 閉じたしおりは負の数（開いたときに見える数）
+          d.set(PDFName.of('Count'), ctx.obj(it.closed ? -sub.count : sub.count));
+          visible = it.closed ? 0 : sub.count;
+        }
+        ctx.assign(refs[i], d);
+        count += 1 + visible;
+      });
+      return { first: refs[0], last: refs[refs.length - 1], count };
+    };
+    const top = build(items, rootRef);
+    ctx.assign(rootRef, ctx.obj({ Type: 'Outlines', First: top.first, Last: top.last, Count: top.count }));
+    catalog.set(PDFName.of('Outlines'), rootRef);
+  } else {
+    catalog.delete(PDFName.of('Outlines'));
+  }
+  // 古いしおりの辞書を消す（消した・名前を変えたしおりの文字がファイルに残らないように）
+  for (const r of oldRefs) ctx.delete(r);
+  if (old.root instanceof PDFRef && old.root !== rootRef) ctx.delete(old.root);
+}
+
+/** しおりを書き換える（取り消しできる）。fn(items) で木を書き換え、false を返したら何もしない */
+export async function editOutline(fn) {
+  const items = await readOutline();
+  // 元のしおりを正しく読めない文書では書き換えない（書き換えると、読めなかったしおりや色・動作が消える）
+  if (items.unmatched !== false || state.libFor !== state.pdf) throw new Error(t('この文書のしおりは、このアプリでは正しく読み取れないため編集できません（元のしおりが壊れるのを防ぐため）'));
+  if (fn(items) === false) return false;
+  await changeStructure((lib) => writeOutline(lib, items));
+  return true;
+}
+
 // ---------------------------------------------------------------- 権限（作成者による制限）
 
 const P = pdfjsLib.PermissionFlag;

@@ -40,6 +40,13 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.26 の変更点
+
+- しおりの編集（doc.js readOutline / writeOutline / editOutline、panels.js outlineAction）。pdf.js の getOutline を { title, page, pos, url, items, closed, src } の木に読み、lib の元のしおりの辞書（src）を同じ形のときだけ対応づける。書き戻すときは元の辞書から構造（Title・Parent・Prev・Next・First・Last・Count）以外をそのまま写す（色・太字・動作・名前の移動先が残る）。閉じたしおりは Count を負に。古いしおりの辞書は消す（消した名前がファイルに残らない）。changeStructure の中で書くので取り消せる。URL のしおりは選ぶだけで、Ctrl + クリックで開く。元のしおりがあるのに pdf.js の読み取りと対応づけられないときは書き換えを断る（items.unmatched）。操作中の重ねての操作は受け付けない
+- ページの大きさをそろえる（doc.js normalizePageSize、features.js normalizeSizeDialog）。見えている枠（CropBox。親から引き継いだものも）を基準に、ページごとに元の向きで、縦横比を保って中央に収める。元の中身は Form XObject（embedPage。その場で embed）にまとめて置く（中身の書き方や q/Q の釣り合いに左右されない）。用紙と表示範囲を新しい大きさにし、PDF の注釈（Rect・QuadPoints・L・Vertices・InkList）、しおり・リンク・/Dests・名前の木（/Names /Dests）の移動先の座標（共有している移動先は 1 回だけ）、このアプリの注釈（rect・points・strokes・quads・width・fontSize）を同じだけ動かす。測定の注釈は縮尺の係数を直して実寸を保つ。全面に 1 ビット画像 1 枚だけのページで縦横比が同じ（0.1% 以内）なら、画像の配置そのものを書き直してスキャン画像の速い表示の条件を保つ。/UserUnit のあるページは変えない。中身のない白紙のページは部品にまとめずに用紙と注釈だけを直す。スキャン画像のページで縦横比が違って速い表示から外れた数は知らせる。ページの素材（Resources）は部品だけを置く新しいものにする。タグ付き PDF の構造（MCID）や透明グループは部品の中に移るので、読み上げなどの対応が崩れることがある
+- ログ（updater.log）にアプリの置き場所・開いたファイルの場所・インストール先・既定のアプリのコマンドを書かない（起動時は起動オプションとファイルの数だけ）。ユーザー名が入るため
+- 自動テストで、しおり（入れ子・名前の移動先）・リンク・注釈・回転・文字のある文書を編集して保存し、開き直して確かめる
+
 ## 1.5.25 の変更点
 
 - 「重ねて比較（図面）」（features.js compareOverlay・overlayPages、計算は renderer/overlay.js）。両方のページを同じ実寸の縮尺（200dpi、大きい方のページが 1200 万画素に収まるまで下げる）で描き、暗い画素を線とする。位置合わせは平行移動だけで、粗い画像（約 200 画素）で広く（大きい辺の 5%）探し、約 1000 画素・実寸で詰める（線の画素を最大 6 万点に間引いて重なりを数える）。相手の版の 2 画素以内に線があれば共通（にじみで縁が色づかない）。古い版だけ＝赤、新しい版だけ＝青、共通＝灰の PNG を古い版のページの大きさで新しい PDF に置き、左上に凡例と補正したずれ（mm）を書く。TIFF の相手は PDF に変換してから比べる。ページ数・大きさの違いは知らせる。1 ページずつ進み具合を出し、中止できる

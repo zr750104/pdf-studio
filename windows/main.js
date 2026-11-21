@@ -682,6 +682,7 @@ function buildMenu() {
         m('ページを複製', 'duplicate-pages'),
         m('ページを抽出...', 'extract-pages'),
         m('文書を分割...', 'split'),
+        m('ページの大きさをそろえる...', 'normalize-size'),
         sep,
         m('ページを削除', 'delete-pages', 'CmdOrCtrl+Shift+D')
       ]

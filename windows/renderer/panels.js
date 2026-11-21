@@ -1,11 +1,12 @@
 // ツールバー・書式バー・サイドバー（ページ／注釈／検索／しおり）
-import { state, bus, hasDoc, pageText, pdfjsLib, addObjects, can, canRotate, measureValue } from './doc.js';
+import { state, bus, hasDoc, pageText, pdfjsLib, addObjects, can, canRotate, measureValue, readOutline, editOutline } from './doc.js';
 import { view, TOOLS, TOOL_GROUPS, setTool, select, selectedObject, scrollToPage, scrollToRect, zoomTo,
   updateObject, removeObject, editObjectContents, drawOverlay, textBoxHeight, subRange, measureWidth,
-  rotateSelected, selectedDisplayAngle, setSelectedDisplayAngle, whenIdle, pageImage } from './viewer.js';
+  rotateSelected, selectedDisplayAngle, setSelectedDisplayAngle, whenIdle, pageImage, currentPage } from './viewer.js';
 import { overflowBar, relayoutBars, panelResizer, layoutSetting, saveLayout } from './layout.js';
-import { $, $$, el, toast } from './util.js';
+import { $, $$, el, toast, promptText, confirmBox } from './util.js';
 import { ICONS } from './icons.js';
+import { t } from './i18n.js';
 import { scanInfo, scanAvailable, renderScan, drawScan, scanTarget } from './scanpages.js';
 
 const icon = (name, cls = '') => el('span', { class: `icon ${cls}`, html: ICONS[name] || '' });
@@ -105,6 +106,7 @@ export const selectedPages = () => [...selected].filter((i) => i < state.pageIds
 
 export function initSidebar(run, pageActions) {
   actions = pageActions;
+  appRun = run;
   const side = $('#sidebar');
   const tabs = [['pages', 'ページ'], ['annots', '注釈'], ['search', '検索'], ['outline', 'しおり']];
   side.append(el('div', { class: 'tabs' }, ...tabs.map(([k, l]) => el('button', { 'data-tab': k, onclick: () => showTab(k) }, l))));
@@ -563,25 +565,149 @@ function markAllForRedaction() {
   toast(`${hits.length} 件に墨消しマークを付けました。「文書 > 墨消しを適用」で確定します。`, 4000);
 }
 
-// ---------------------------------------------------------------- しおり（閲覧）
+// ---------------------------------------------------------------- しおり（閲覧・編集）
+
+let outlineSel = null; // 選んでいるしおりの位置（[0, 2] なら 1 つ目の子の 3 つ目）
+const samePath = (a, b) => !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+/** path の位置のしおりと、それが入っている並び */
+function outlineAt(items, path) {
+  if (!path?.length) return { list: items, index: -1, item: null };
+  let list = items;
+  for (let k = 0; k < path.length - 1; k++) {
+    const it = list[path[k]];
+    if (!it) return { list: [], index: -1, item: null }; // 途中が見つからない（取り消しなどで古くなった選択）
+    list = it.items || (it.items = []);
+  }
+  return { list, index: path[path.length - 1], item: list[path[path.length - 1]] || null };
+}
+// 別の文書を開いたら選択を外す
+bus.addEventListener('doc-opened', () => { outlineSel = null; });
+
+/** しおりの編集（ボタン・メニューから） */
+let outlineBusy = false;
+let appRun = null; // メニューと同じ「処理中」の仕組み（app.js の run）。しおりの操作もこれを通す
+/** 画面のボタンから：ほかの操作（取り消し・ページの操作など）と重ならないよう、メニューと同じ仕組みで動かす */
+function requestOutline(kind) { return appRun ? appRun(`outline-${kind}`) : outlineAction(kind); }
+export async function outlineAction(kind) {
+  // 前の操作（保存と読み込み直し）が終わるまで次の操作は受け付けない（古いしおりで上書きしないように）
+  if (outlineBusy) return;
+  outlineBusy = true;
+  try { await outlineActionNow(kind); } finally { outlineBusy = false; }
+}
+async function outlineActionNow(kind) {
+  if (!hasDoc()) return;
+  // 操作を始めた時点の選択を控える（このあと待っている間に選び直されても、始めたときのしおりを対象にする）
+  const sel = outlineSel ? [...outlineSel] : null;
+  // しおりを正しく読めない文書は、名前を入力させる前に知らせる
+  if ((await readOutline()).unmatched !== false) return toast(t('この文書のしおりは、このアプリでは正しく読み取れないため編集できません（元のしおりが壊れるのを防ぐため）'), 5000);
+  if (!can('modify')) return toast('この文書は作成者により編集が制限されています');
+  const page = view.pages.length ? currentPage() : 0;
+  let title = null;
+  if (kind === 'add') {
+    title = await promptText('しおりを追加', t('{n} ページ').replace('{n}', page + 1), { message: 'しおりの名前（今のページに移動するしおりを作ります）' });
+    if (title == null || !title.trim()) return;
+  }
+  if (kind !== 'add' && (!sel || !outlineAt(await readOutline(), sel).item)) { outlineSel = null; renderOutline(); return toast('しおりを選んでください'); }
+  if (kind === 'rename') {
+    const cur = outlineAt(await readOutline(), sel).item;
+    if (!cur) return;
+    title = await promptText('しおりの名前を変更', cur.title);
+    if (title == null || !title.trim() || title === cur.title) return;
+  }
+  if (kind === 'delete') {
+    const cur = outlineAt(await readOutline(), sel).item;
+    if (!cur) return;
+    if (cur.items?.length && !(await confirmBox('しおりを削除', t('「{a}」とその下のしおり（{n} 個）を削除します。').replace('{a}', cur.title).replace('{n}', countOutline(cur.items)), '削除'))) return;
+  }
+  let next = sel;
+  // 確かめる相手：操作を始めたときのしおり（元の辞書。新しく足したものは題名）
+  const start = kind === 'add' ? null : outlineAt(await readOutline(), sel).item;
+  let moved = false;
+  const ok = await editOutline((items) => {
+    if (kind === 'add') {
+      const it = { title: title.trim(), page, pos: ['XYZ', null, null, null], url: null, items: [] };
+      // 選んでいるしおりの後ろ（なければ最後）に足す
+      const at = sel ? outlineAt(items, sel) : null;
+      if (at?.item) { at.list.splice(at.index + 1, 0, it); next = [...sel.slice(0, -1), at.index + 1]; }
+      else { items.push(it); next = [items.length - 1]; }
+      return true;
+    }
+    const { list, index, item } = outlineAt(items, sel);
+    // 待っている間に、選んでいた位置のしおりが変わっていたら、何もしない
+    if (!item || (start && (start.src ? item.src !== start.src : item.title !== start.title))) { moved = true; return false; }
+    const parentPath = sel.slice(0, -1);
+    switch (kind) {
+      case 'rename': item.title = title.trim(); return true;
+      case 'delete': list.splice(index, 1); next = list.length ? [...parentPath, Math.min(index, list.length - 1)] : (parentPath.length ? parentPath : null); return true;
+      case 'up': if (index === 0) return false; [list[index - 1], list[index]] = [list[index], list[index - 1]]; next = [...parentPath, index - 1]; return true;
+      case 'down': if (index >= list.length - 1) return false; [list[index + 1], list[index]] = [list[index], list[index + 1]]; next = [...parentPath, index + 1]; return true;
+      case 'indent': {
+        // 1 つ上のしおりの子にする
+        if (index === 0) return false;
+        const prev = list[index - 1];
+        list.splice(index, 1);
+        prev.items = prev.items || [];
+        prev.items.push(item);
+        next = [...parentPath, index - 1, prev.items.length - 1];
+        return true;
+      }
+      case 'outdent': {
+        // 親と同じ段の、親のすぐ後ろへ
+        if (!parentPath.length) return false;
+        const parent = outlineAt(items, parentPath);
+        list.splice(index, 1);
+        parent.list.splice(parent.index + 1, 0, item);
+        next = [...parentPath.slice(0, -1), parent.index + 1];
+        return true;
+      }
+      default: return false;
+    }
+  }).catch((e) => { toast(`${t('しおりを変更できませんでした')}: ${e.message}`, 5000); return false; });
+  if (moved) { outlineSel = null; renderOutline(); toast('しおりが変わったため中止しました'); return; }
+  if (ok) { outlineSel = next; renderOutline(); }
+}
+const countOutline = (items) => items.reduce((n, it) => n + 1 + countOutline(it.items || []), 0);
 
 async function renderOutline() {
   const box = $('#outline');
   const pdf = state.pdf;
-  const outline = await pdf.getOutline().catch(() => null);
+  if (!pdf) return;
+  const outline = await readOutline(pdf).catch(() => []);
   if (pdf !== state.pdf) return;
-  if (!outline?.length) { box.replaceChildren(el('p', { class: 'empty' }, 'この文書にはしおりがありません。')); return; }
+  const editable = can('modify');
+  const tb = (label, kind, title) => el('button', { class: 'small', title, disabled: !editable, onclick: () => requestOutline(kind) }, label);
+  const tools = el('div', { class: 'outline-tools' },
+    tb('＋', 'add', '今のページにしおりを追加'), tb('名前', 'rename', '名前を変更'), tb('削除', 'delete', '削除'),
+    tb('↑', 'up', '上へ'), tb('↓', 'down', '下へ'), tb('→', 'indent', '1 段下げる（上のしおりの中へ）'), tb('←', 'outdent', '1 段上げる'));
+  // 取り消し・やり直しなどで選択が古くなっていたら外す
+  if (outlineSel && !outlineAt(outline, outlineSel).item) outlineSel = null;
+  if (!outline.length) {
+    outlineSel = null;
+    box.replaceChildren(tools, el('p', { class: 'empty' }, 'この文書にはしおりがありません。'));
+    return;
+  }
   const rows = [];
-  const build = (items, depth) => items.forEach((it) => {
-    rows.push(el('div', { class: 'outline-item', translate: 'no', style: `padding-left:${8 + depth * 14}px`, title: it.title, onclick: async () => {
-      if (it.url) return window.api.openExternal(it.url);
-      const dest = typeof it.dest === 'string' ? await state.pdf.getDestination(it.dest) : it.dest;
-      if (dest?.[0]) scrollToPage(await state.pdf.getPageIndex(dest[0]));
-    } }, it.title));
-    if (it.items?.length) build(it.items, depth + 1);
+  const build = (items, depth, base) => items.forEach((it, i) => {
+    const path = [...base, i];
+    const sel = samePath(path, outlineSel);
+    rows.push(el('div', {
+      class: `outline-item${sel ? ' selected' : ''}${it.page == null && !it.url && !it.other ? ' broken' : ''}`, translate: 'no',
+      style: `padding-left:${8 + depth * 14}px`, title: it.url ? `${it.title}\n${it.url}\n${t('Ctrl + クリックで開く')}` : it.title,
+      onclick: (e) => {
+        outlineSel = path;
+        for (const r of box.querySelectorAll('.outline-item.selected')) r.classList.remove('selected');
+        rows[rows.indexOf(row)]?.classList.add('selected');
+        // URL のしおりは選ぶだけ（Ctrl / ⌘ を押しながらクリックしたときだけブラウザで開く）
+        if (it.url) { if (e.ctrlKey || e.metaKey) window.api.openExternal(it.url); return; }
+        if (it.page != null) scrollToPage(it.page);
+      },
+      ondblclick: () => { outlineSel = path; requestOutline('rename'); }
+    }, it.title));
+    const row = rows[rows.length - 1];
+    if (it.items?.length) build(it.items, depth + 1, path);
   });
-  build(outline, 0);
-  box.replaceChildren(...rows);
+  build(outline, 0, []);
+  box.replaceChildren(tools, ...rows);
 }
 
 // ---------------------------------------------------------------- 書式バー
