@@ -593,7 +593,22 @@
   "前回 PDF Studio が正しく終了しなかったため、保存していない文書が残っています": "PDF Studio did not close properly last time, and some unsaved documents were kept",
   "「復元する」を選ぶと、保存していない状態で開きます。内容を確かめてから保存してください。": "Choose \"Restore\" to open them as unsaved documents. Check the contents, then save.",
   "ここに PDF・画像・Word などのファイルをドラッグ＆ドロップしても開けます": "You can also drag and drop PDF, image, Word and other files here",
-  "前回保存していなかった文書を復元しました。内容を確かめてから保存してください。": "Restored a document that was not saved last time. Check the contents, then save."
+  "前回保存していなかった文書を復元しました。内容を確かめてから保存してください。": "Restored a document that was not saved last time. Check the contents, then save.",
+  "重ねて比較（図面）...": "Overlay Compare (Drawings)...",
+  "重ねて比較する（新しい版の）ファイル": "File to overlay (newer version)",
+  "比較するファイルを開けませんでした": "Could not open the file to compare",
+  "重ねて比較しています": "Overlaying and comparing",
+  "ページ {n} は大きさが違います": "Page {n} has a different size",
+  "赤：古い版だけにある線": "Red: lines only in the old version",
+  "青：新しい版だけにある線": "Blue: lines only in the new version",
+  "灰：共通の線": "Gray: lines in both",
+  "位置のずれを補正": "Position offset corrected",
+  "重ねて比較できませんでした": "Could not overlay and compare",
+  "ページ数が違います（{a} / {b}）。先頭から {n} ページだけを比べました": "The page counts differ ({a} / {b}). Only the first {n} pages were compared",
+  "重ねて比較しました": "Overlay comparison complete",
+  "{n} ページのうち {c} ページに違いがあります": "{c} of {n} pages have differences",
+  "回転や拡大縮小の違いは補正しません": "Differences in rotation or scale are not corrected",
+  "重ねて比較": "overlay"
  },
  "patterns": [
   [

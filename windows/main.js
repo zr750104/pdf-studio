@@ -705,6 +705,7 @@ function buildMenu() {
         m('縮尺を合わせる（キャリブレーション）...', 'calibrate'),
         sep,
         m('文書を比較...', 'compare'),
+        m('重ねて比較（図面）...', 'compare-overlay'),
         m('文書のプロパティ...', 'properties', 'CmdOrCtrl+D')
       ]
     },
@@ -1270,6 +1271,11 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     const any = windows.get(arg.id);
     if (arg.do === 'move-window' && t) { moveTabToNewWindow(t); return true; }
     if (arg.do === 'eval-any' && any) return any.wc.executeJavaScript(arg.js);
+    if (arg.do === 'shot-any' && any) {
+      const img = await any.wc.capturePage();
+      fs.writeFileSync(path.join(process.env.PDFSTUDIO_TEST_OUT || path.join(os.tmpdir(), 'pdfstudio-test'), `${arg.name}.png`), img.toPNG());
+      return true;
+    }
     if (arg.do === 'close-any' && any) { destroyTab(any); return true; }
     if (arg.do === 'request-close-any' && any) {
       // タブの × と同じ閉じ方。閉じたあとのそのウィンドウの様子を返す

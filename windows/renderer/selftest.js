@@ -1165,6 +1165,72 @@ async function tabTests() {
   await tab({ do: 'focus-self' });
 }
 
+// 図面の重ね合わせ比較：ずれを見つけて合わせ、足した線だけを「新しい版だけ」として色分けする
+async function overlayTests() {
+  const drawing = async (shift, extra) => {
+    const d = await PL.PDFDocument.create();
+    const p = d.addPage([842, 595]); // A4 横
+    const [sx, sy] = shift;
+    const line = (x1, y1, x2, y2, w = 1.2) => p.drawLine({ start: { x: x1 + sx, y: y1 + sy }, end: { x: x2 + sx, y: y2 + sy }, thickness: w });
+    line(40, 40, 800, 40); line(800, 40, 800, 555); line(800, 555, 40, 555); line(40, 555, 40, 40); // 枠
+    for (let k = 0; k < 12; k++) line(80 + k * 55, 80, 120 + k * 55, 300 + (k % 3) * 60, 0.8); // 図
+    line(100, 420, 500, 420, 2); line(300, 330, 300, 520, 2);
+    if (extra) line(560, 120, 760, 260, 1.5); // 新しい版で足した線
+    return d.save();
+  };
+  const oldBytes = await drawing([0, 0], false);
+  const newBytes = await drawing([6, 4], true); // 右に 6pt・上に 4pt ずれた版に 1 本足した
+  await openBytes(oldBytes, { name: 'old-drawing.pdf', askPassword: async () => null });
+  await ready();
+  const other = await pdfjsLib.getDocument({ data: newBytes.slice(), ...PDFJS_OPTS }).promise;
+  const t0 = performance.now();
+  const r = await F.overlayPages(await state.pdf.getPage(1), await other.getPage(1));
+  const ms = Math.round(performance.now() - t0);
+  const s = 200 / 72;
+  const okShift = Math.abs(r.shiftPx[0] + 6 * s) <= 2 && Math.abs(r.shiftPx[1] - 4 * s) <= 2;
+  check(okShift, `重ねて比較：ずれを見つけて合わせる (${r.shiftPx.join(', ')} 画素 / 期待 ${(-6 * s).toFixed(1)}, ${(4 * s).toFixed(1)} → ${r.shiftMm.join(', ')} mm)`);
+  check(r.added > 300 && r.removed < r.added * 0.1, `重ねて比較：足した線だけが新しい版だけの線になる（縁は色づかない） (新 ${r.added} / 旧 ${r.removed} / 線全体 ${r.total}, ${ms}ms)`);
+  // 同じ図面同士では違いがない
+  const same = await F.overlayPages(await state.pdf.getPage(1), await state.pdf.getPage(1));
+  check(same.added + same.removed === 0 && same.shiftPx.join() === '0,0', `重ねて比較：同じ図面同士は違いなし (${same.added + same.removed})`);
+  other.destroy();
+  // メニューと同じ流れ：結果を新しいタブに開く
+  const info = () => api.selftest('tabs');
+  const tab = (arg) => api.selftest('tab', arg);
+  const self = (await info()).self;
+  answer({});
+  await F.compareOverlay({ files: [{ name: 'new-drawing.pdf', bytes: newBytes }] });
+  await sleep(800);
+  const tabs = (await info()).tabs;
+  const res = tabs.find((x) => x.id !== self && /old-drawing_/.test(x.title));
+  check(res, `重ねて比較：結果を新しいタブに開く (${tabs.map((x) => x.title).join(' / ')})`);
+  if (res) { await tab({ do: 'activate', id: res.id }); await sleep(1500); await tab({ do: 'shot-any', id: res.id, name: 'overlay-result' }); await tab({ do: 'activate', id: self }); }
+  for (const x of tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+  window.__askQueue = [];
+
+  // スキャン図面（白黒の TIFF）：今の文書は速い描き方、相手は pdf.js で描いても、同じ図面なら違いが出ない。強く縮小しても線が消えたり色づいたりしない
+  await F.openHere(await (await fetch('app://local/test/fixtures/fax_g4.tif')).arrayBuffer().then((b) => new Uint8Array(b)), null, 'scan.tif');
+  await ready();
+  const fast = !!(await import('./scanpages.js')).scanInfo(0);
+  const scanOther = await pdfjsLib.getDocument({ data: state.bytes.slice(), ...PDFJS_OPTS }).promise;
+  const renderA = async (sc) => {
+    const { canvas } = await F.renderToCanvas(state.pdf, 0, sc * 72);
+    const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    canvas.width = 0;
+    return d;
+  };
+  const pa = await state.pdf.getPage(1);
+  const full = await F.overlayPages(pa, await scanOther.getPage(1), { renderA });
+  const vp = pa.getViewport({ scale: 1 });
+  const small = await F.overlayPages(pa, await scanOther.getPage(1), { renderA, maxPixels: (vp.width * vp.height * (200 / 72) ** 2) / 12 });
+  const rate = (r) => (r.added + r.removed) / Math.max(1, r.total);
+  check(fast && full.total > 1000 && full.shiftPx.join() === '0,0' && rate(full) < 0.0005,
+    `重ねて比較：スキャン図面（速い描き方と pdf.js）同士でも違いが出ない (速い描き方 ${fast}, ずれ ${full.shiftPx}, 違い ${full.added + full.removed} / ${full.total})`);
+  check(small.total > 100 && small.shiftPx.join() === '0,0' && rate(small) < 0.0005,
+    `重ねて比較：強く縮小しても線が消えたり色づいたりしない (ずれ ${small.shiftPx}, 違い ${small.added + small.removed} / ${small.total})`);
+  scanOther.destroy();
+}
+
 // 最近使ったファイル・前回の続き・異常終了時の復元
 async function sessionTests(out) {
   const ses = (arg) => api.selftest('session', arg);
@@ -1438,9 +1504,11 @@ export async function run() {
     if (only === 'tabs') { await tabTests(); throw new Error('__only__'); }
     if (only === 'scan') { await scanFastTests(); throw new Error('__only__'); }
     if (only === 'session') { await sessionTests(out); throw new Error('__only__'); }
+    if (only === 'overlay') { await overlayTests(); throw new Error('__only__'); }
     await layoutTests();
     await tabTests();
     await sessionTests(out);
+    await overlayTests();
     await rotationTests();
     await measureTests();
     await tiffTests();

@@ -12,6 +12,7 @@ import { isTiff, addTiffPages, lastStats as tiffStats } from './tiff.js';
 import { scanInfo, scanAvailable, renderScan, drawScan } from './scanpages.js';
 import { t } from './i18n.js';
 import { sniffKind, embedImage } from './sources.js';
+import { darkMask, findShift, placeShifted, compose } from './overlay.js';
 export { sniffKind } from './sources.js';
 
 const { PDFDocument, rgb, degrees } = PL;
@@ -1032,6 +1033,140 @@ export async function finishCalibration({ points }) {
   const decimals = Math.min(4, Math.max(0, Math.round(r.decimals || 0)));
   const changed = setMeasureScale({ factor: scaleFactor(ratio, unit), unit, label: `1:${nice}`, ratio, decimals }, r.all);
   toast(`縮尺を 1:${nice} に合わせました${changed ? `（${changed} 件の測定を更新）` : ''}`, 3500);
+}
+
+// ---------------------------------------------------------------- 図面の重ね合わせ比較
+
+/** 比較相手のファイルを pdf.js で開く（TIFF は PDF に変換してから。パスワードは聞く） */
+async function openOtherForCompare(file) {
+  let data = new Uint8Array(file.bytes);
+  if (isTiff(file.name) || sniffKind(file.name, data) === 'tiff') {
+    const doc = await PDFDocument.create();
+    await addTiffPages(doc, data);
+    data = await doc.save();
+  }
+  try {
+    return await pdfjsLib.getDocument({ data: data.slice(), ...PDFJS_OPTS }).promise;
+  } catch (e) {
+    if (e?.name !== 'PasswordException') throw e;
+    const pw = await askPassword(`${file.name} はパスワードで保護されています。`);
+    if (pw == null) return null;
+    return pdfjsLib.getDocument({ data: data.slice(), password: pw, ...PDFJS_OPTS }).promise;
+  }
+}
+
+/** pdf.js のページを、1pt あたり s 画素で描いた画像にする（白い背景） */
+async function renderForCompare(page, s) {
+  const vp = page.getViewport({ scale: s });
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(vp.width));
+  c.height = Math.max(1, Math.round(vp.height));
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  c.width = 0;
+  return img;
+}
+
+/**
+ * 古い版（今の文書）と新しい版の 1 ページを重ねた画像（PNG）と、変わった量を返す。
+ * renderA：古い版のページを描く関数（今の文書のスキャン画像のページは、速い描き方で描けるように）
+ */
+export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, renderA = null } = {}) {
+  const va = pageA.getViewport({ scale: 1 }), vb = pageB.getViewport({ scale: 1 });
+  // 同じ実寸の縮尺で描く（画素の大きさではそろえない）。大きい方のページが上限に収まるように
+  const s = Math.min(dpi / 72, Math.sqrt(maxPixels / Math.max(va.width * va.height, vb.width * vb.height)));
+  // 線だけを取り出したら、画素はすぐ手放す（大きな図面でメモリを使いすぎないように）
+  let img = renderA ? await renderA(s) : await renderForCompare(pageA, s);
+  const w = img.width, h = img.height;
+  const a = darkMask(img);
+  img = await renderForCompare(pageB, s);
+  const bw = img.width, bh = img.height;
+  const b = darkMask(img);
+  img = null;
+  pageB.cleanup();
+  const { dx, dy } = findShift(a, w, h, b, bw, bh);
+  const bPlaced = placeShifted(b, bw, bh, w, h, dx, dy);
+  const r = compose(a, bPlaced, w, h, 2);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d').putImageData(r.image, 0, 0);
+  const png = await canvasToBytes(c, 'image/png');
+  c.width = 0;
+  const sizeDiffers = Math.abs(va.width - vb.width) > Math.max(2, va.width * 0.01) || Math.abs(va.height - vb.height) > Math.max(2, va.height * 0.01);
+  // ずれは mm で（1pt = 25.4/72 mm）
+  const mm = (px) => Math.round((px / s) * (25.4 / 72) * 10) / 10;
+  return { png, widthPt: va.width, heightPt: va.height, removed: r.removed, added: r.added, total: r.total, shiftMm: [mm(dx), mm(dy)], shiftPx: [dx, dy], sizeDiffers };
+}
+
+/** 今の文書（古い版）と、選んだファイル（新しい版）のページを重ねて、違いを色分けした PDF を新しいタブに作る */
+export async function compareOverlay({ files = null } = {}) {
+  // ページの画像を新しい PDF に書き出すので、画像の書き出しと同じく「コピー」が許されている文書だけ
+  if (!requireDoc() || !allowed('copy')) return;
+  files = files || await window.api.openDialog({ title: '重ねて比較する（新しい版の）ファイル', filters: [{ name: 'PDF / TIFF', extensions: ['pdf', 'tif', 'tiff'] }] });
+  if (!files.length) return;
+  let other;
+  try {
+    other = await openOtherForCompare(files[0]);
+  } catch (e) {
+    return alertBox('比較するファイルを開けませんでした', e.message);
+  }
+  if (!other) return;
+  const n = Math.min(state.pdf.numPages, other.numPages);
+  const pr = progress('重ねて比較しています', n);
+  const notes = [];
+  let changedPages = 0;
+  let out;
+  try {
+    out = await PDFDocument.create();
+    // 凡例の文字：表示言語の文字が入ったフォント（タイ語ならタイ語のフォント）
+    const font = await textFont(out, t('赤：古い版だけにある線'));
+    for (let i = 0; i < n; i++) {
+      if (pr.cancelled) throw new Error('CANCELLED');
+      pr.update(i);
+      // 古い版（今の文書）は、スキャン画像のページなら速い描き方で描く
+      const renderA = async (s) => {
+        const { canvas } = await renderToCanvas(state.pdf, i, s * 72);
+        const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+        canvas.width = 0;
+        return data;
+      };
+      const r = await overlayPages(await state.pdf.getPage(i + 1), await other.getPage(i + 1), { renderA });
+      const img = await out.embedPng(r.png);
+      const page = out.addPage([r.widthPt, r.heightPt]);
+      page.drawImage(img, { x: 0, y: 0, width: r.widthPt, height: r.heightPt });
+      // 変わった画素が線全体の 0.05% 以下なら「違いなし」とみなす（細かなにじみを数えない）
+      const changed = r.removed + r.added > Math.max(20, r.total * 0.0005);
+      if (changed) changedPages++;
+      if (r.sizeDiffers) notes.push(t('ページ {n} は大きさが違います').replace('{n}', i + 1));
+      // 凡例（左上）
+      const size = Math.max(7, Math.min(14, r.widthPt / 70));
+      const lines = [
+        [t('赤：古い版だけにある線'), PL.rgb(0.86, 0.12, 0.12)],
+        [t('青：新しい版だけにある線'), PL.rgb(0.08, 0.35, 0.92)],
+        [t('灰：共通の線'), PL.rgb(0.35, 0.35, 0.35)],
+        [`${t('位置のずれを補正')}: ${r.shiftMm[0]} mm, ${r.shiftMm[1]} mm`, PL.rgb(0.2, 0.2, 0.2)]
+      ];
+      const boxW = Math.max(...lines.map(([s2]) => font.widthOfTextAtSize(s2, size))) + size * 1.2;
+      const boxH = lines.length * size * 1.4 + size * 0.6;
+      page.drawRectangle({ x: size * 0.6, y: r.heightPt - boxH - size * 0.6, width: boxW, height: boxH, color: PL.rgb(1, 1, 1), opacity: 0.9, borderColor: PL.rgb(0.6, 0.6, 0.6), borderWidth: 0.5 });
+      lines.forEach(([s2, color], k) => page.drawText(s2, { x: size * 1.2, y: r.heightPt - size * 0.6 - size * 1.4 * (k + 1), size, font, color }));
+    }
+    pr.update(n);
+  } catch (e) {
+    if (e?.message === 'CANCELLED') return;
+    return alertBox('重ねて比較できませんでした', e.message);
+  } finally {
+    pr.close();
+    other.destroy();
+  }
+  if (state.pdf.numPages !== other.numPages) notes.push(t('ページ数が違います（{a} / {b}）。先頭から {n} ページだけを比べました').replace('{a}', state.pdf.numPages).replace('{b}', other.numPages).replace('{n}', n));
+  const bytes = await out.save();
+  await alertBox(t('重ねて比較しました'), `${t('{n} ページのうち {c} ページに違いがあります').replace('{n}', n).replace('{c}', changedPages)}${notes.length ? `\n\n${notes.join('\n')}` : ''}\n\n${t('回転や拡大縮小の違いは補正しません')}`);
+  await openResult(bytes, `${baseName(state.name)}_${t('重ねて比較')}.pdf`);
 }
 
 export async function compare() {

@@ -59,6 +59,7 @@ const ACTIONS = {
   protect: F.protect,
   unprotect: F.unprotect,
   compare: F.compare,
+  'compare-overlay': () => F.compareOverlay(),
   'measure-scale': F.measureScale,
   calibrate: F.calibrate,
   properties: F.properties,
