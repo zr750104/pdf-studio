@@ -120,6 +120,11 @@ const objs = (i = 0) => state.objects[state.pageIds[i]] || [];
 async function uiTests() {
   await openBytes(await makeSample(), { name: 'ui.pdf', askPassword: async () => null });
   await ready();
+  // 起動直後は描画が落ち着かず、送ったマウスの動きがまとめられて途中が抜けることがある（裏で動かすときに起きた）。
+  // 画面が何回か描かれるのを待ち、マウスを一度動かしてから始める
+  for (let k = 0; k < 10; k++) await new Promise((r) => requestAnimationFrame(r));
+  await input([{ type: 'mouseMove', x: 5, y: 5 }, { type: 'mouseMove', x: 15, y: 15 }]);
+  await sleep(500);
   const s = view.scale;
   // 矩形をドラッグで描く
   setTool('rect');
@@ -174,18 +179,24 @@ async function uiTests() {
   check(viewerEl.scrollTop > st0 + 50, '手のひらツールでスクロール');
   // 手のひらで勢いよく動かして離すと、離したあとも滑って、だんだん止まる（慣性スクロール）
   {
-    viewerEl.scrollTop = 0;
-    await sleep(100);
-    const [fx, fy1] = at(0, 0.5, 0.85), [, fy2] = at(0, 0.5, 0.35);
-    const before = pointerUps;
-    const evs = [{ type: 'mouseMove', x: R(fx), y: R(fy1) }, { type: 'mouseDown', x: R(fx), y: R(fy1), button: 'left', clickCount: 1 }];
-    for (let k = 1; k <= 8; k++) evs.push({ type: 'mouseMove', x: R(fx), y: R(fy1 + ((fy2 - fy1) * k) / 8), button: 'left', modifiers: ['leftButtonDown'] });
-    evs.push({ type: 'mouseUp', x: R(fx), y: R(fy2), button: 'left', clickCount: 1 });
-    await input(evs);
-    await waitPointerUp(before);
-    const atUp = viewerEl.scrollTop;
-    await sleep(250);
-    const mid = viewerEl.scrollTop;
+    // 離した入力の処理が負荷で 60ms 以上遅れると「止めてから離した」扱いになり滑らない（テストの時間のぶれ）。
+    // そのときだけ払い直す（2 回とも滑らなければ失敗）
+    let atUp = 0, mid = 0, evs = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      viewerEl.scrollTop = 0;
+      await sleep(300);
+      const [fx, fy1] = at(0, 0.5, 0.85), [, fy2] = at(0, 0.5, 0.35);
+      const before = pointerUps;
+      evs = [{ type: 'mouseMove', x: R(fx), y: R(fy1) }, { type: 'mouseDown', x: R(fx), y: R(fy1), button: 'left', clickCount: 1 }];
+      for (let k = 1; k <= 8; k++) evs.push({ type: 'mouseMove', x: R(fx), y: R(fy1 + ((fy2 - fy1) * k) / 8), button: 'left', modifiers: ['leftButtonDown'] });
+      evs.push({ type: 'mouseUp', x: R(fx), y: R(fy2), button: 'left', clickCount: 1 });
+      await input(evs);
+      await waitPointerUp(before);
+      atUp = viewerEl.scrollTop;
+      await sleep(250);
+      mid = viewerEl.scrollTop;
+      if (mid > atUp + 30) break;
+    }
     await sleep(2600);
     const end = viewerEl.scrollTop;
     await sleep(300);
@@ -892,6 +903,34 @@ async function tabTests() {
   let s = await info();
   const self = s.self;
   check(s.tabs.length === 1 && s.active === self, `最初はタブ 1 つ (${s.tabs.length})`);
+
+  // 実際のドロップ：対応していないファイルは知らせ、画像は PDF にして新しいタブで開く
+  {
+    const dropFiles = (files) => {
+      const dt = new DataTransfer();
+      for (const f of files) dt.items.add(f);
+      document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    };
+    const until = async (fn, ms = 8000) => { const t0 = performance.now(); while (performance.now() - t0 < ms) { if (await fn()) return true; await sleep(100); } return false; };
+    window.__askQueue = [];
+    answer({});
+    dropFiles([new File(['{"a":1}'], 'settings.json')]);
+    const told = await until(() => window.__askQueue.length === 0);
+    s = await info();
+    window.__askQueue = []; // 使われなかった答えを、あとのテストに残さない
+    check(told && s.tabs.length === 1, `ドロップ：対応していないファイルは開かずに知らせる (お知らせ ${told}, タブ ${s.tabs.length})`);
+    const cv = document.createElement('canvas'); cv.width = 40; cv.height = 30;
+    cv.getContext('2d').fillRect(0, 0, 20, 15);
+    const png = await canvasToBytes(cv, 'image/png');
+    dropFiles([new File([png], 'dropped-photo.png', { type: 'image/png' })]);
+    const opened = await until(async () => (await info()).tabs.some((x) => x.title === 'dropped-photo.pdf'));
+    s = await info();
+    check(opened, `ドロップ：画像は PDF にして新しいタブで開く (${s.tabs.map((x) => x.title).join(' / ')})`);
+    for (const x of s.tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+    await tab({ do: 'activate', id: self });
+    await sleep(300);
+    s = await info();
+  }
   // 2 つ目の文書は同じウィンドウの新しいタブ
   await api.openInNewWindow(await makeSample(), 'second.pdf', null);
   await sleep(300);
@@ -1109,6 +1148,8 @@ async function tabTests() {
   }
   if (infoMv.ready) {
     // 最後のタブを × で閉じても、ウィンドウは閉じずに空のタブが残る
+    // （TIFF から変換したタブは保存していない変更がある扱いなので、確認には「保存しない」と答える）
+    await queue('askSave', 1);
     const rc = await tab({ do: 'request-close-any', id: mv });
     check(rc.windowOpen && rc.tabs.length === 1 && rc.tabs[0].empty, `最後のタブを閉じても空のタブが残りアプリは終わらない (${JSON.stringify(rc)})`);
     for (const x of rc.tabs) await tab({ do: 'close-any', id: x.id });
@@ -1495,6 +1536,83 @@ export async function run() {
       const beforeIns = state.pageIds.length;
       await changeStructure((lib) => insertFromSources(lib, beforeIns, [{ name: 'photo.png', bytes: jpg }]));
       check(state.pageIds.length === beforeIns + 1, 'ページの挿入：中身が JPEG の .png も挿入できる');
+    }
+
+    // 12d. インストール不要版：新しい版のフォルダーで起動したら、ダブルクリックで開く exe の場所を書き直す
+    {
+      const r = await api.selftest('portable-openwith');
+      // D:/new/./ と D:\new\ は Windows では同じ場所
+      const want = ['none', 'same', 'same', 'update', 'keep-installed', 'update', 'keep-newer', 'update'];
+      check(r && r.cases.join() === want.join(), `インストール不要版：古い・消えた場所は書き直し、登録がない・インストール版・新しい版はそのまま (${r?.cases.join()})`);
+      check(r && r.parse[0] === 'C:\\a b\\PDF Studio.exe' && r.parse[1] === 'C:\\x\\PDF Studio.exe' && r.parse[2] === null, `インストール不要版：登録されたコマンドから exe の場所を読む (${r?.parse.join(' | ')})`);
+      check(r && r.cmp[0] > 0 && r.cmp[1] < 0 && r.cmp[2] === 0 && r.cmp[3] < 0, `版の比較（1.5.10 は 1.5.9 より新しい・試験版は古い） (${r?.cmp.join()})`);
+    }
+
+    // 12c. ドラッグ＆ドロップ：画像・Word・テキストは PDF にして開く。場所がなくても中身から変換する。対応していないものは知らせる
+    {
+      const jpg = await canvasToBytes(c, 'image/jpeg');
+      const enc = (x) => new TextEncoder().encode(x);
+      const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0]);
+      const dk = (name, bytes) => F.droppedKind(name, bytes);
+      const dcases = [
+        [dk('a.pdf', enc('anything')), 'open'], [dk('scan.TIF', new Uint8Array(0)), 'open'], [dk('a.png', png), 'png'],
+        [dk('photo.png', jpg), 'jpeg'], [dk('memo.txt', enc('hello')), 'text'], [dk('page.html', enc('<p>x</p>')), 'text'],
+        [dk('data.json', enc('{"a":1}')), null], [dk('app.js', enc('let a = 1')), null], [dk('a.docx', zip), 'docx'],
+        [dk('slides.pptx', zip), null], [dk('folder', new Uint8Array(0)), null]
+      ];
+      const dbad = dcases.map(([got, want], i) => (got === want ? null : `${i}:${got}≠${want}`)).filter(Boolean);
+      check(!dbad.length, `ドロップ：開く・PDF にする・断る形式を見分ける (${dbad.join(', ') || 'OK'})`);
+      const sk = [];
+      const items = await F.prepareDropped([
+        { name: 'drawing.pdf', bytes: await buildOutput({ security: null }) },
+        { name: 'photo.png', bytes: jpg },
+        { name: 'メモ.txt', bytes: enc('ドロップしたテキスト') },
+        { name: 'page.htm', bytes: enc('<h1>ドロップした見出し</h1>') },
+        { name: 'config.json', bytes: enc('{"a":1}') },
+        { name: 'movie.mp4', bytes: new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]) }
+      ], sk);
+      check(items.map((x) => `${x.name}:${x.converted}`).join() === 'drawing.pdf:false,photo.pdf:true,メモ.pdf:true,page.pdf:true',
+        `ドロップ：PDF はそのまま、画像・テキスト・HTML は 1 ファイルずつ PDF にする (${items.map((x) => x.name).join()})`);
+      check(sk.map((x) => x.name).join() === 'config.json,movie.mp4', `ドロップ：対応していないファイルは知らせる (${sk.map((x) => `${x.name}: ${x.reason}`).join(' / ')})`);
+      const txt = items.find((x) => x.name === 'メモ.pdf');
+      const tt = txt ? (await textOf(txt.bytes)).text : '';
+      check(tt.replace(/\s/g, '').includes('ドロップしたテキスト'), `ドロップ：場所がなくてもテキストを PDF にできる (${tt.slice(0, 20)})`);
+      const ht = items.find((x) => x.name === 'page.pdf');
+      const htx = ht ? (await textOf(ht.bytes)).text : '';
+      // Word も場所なしで中身から変換できる（最小の .docx を無圧縮の ZIP で作る）
+      const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+      const crc32 = (u) => { let c = 0xffffffff; for (const v of u) c = crcT[(c ^ v) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+      const zipStore = (entries) => {
+        const parts = []; const cen = []; let off = 0;
+        for (const [nm, text] of entries) {
+          const name = enc(nm), data = enc(text), crc = crc32(data);
+          const head = (sig, extra) => { const b = new DataView(new ArrayBuffer(extra)); b.setUint32(0, sig, true); return b; };
+          const lh = head(0x04034b50, 30); lh.setUint16(4, 20, true); lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, name.length, true);
+          const ch = head(0x02014b50, 46); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true); ch.setUint32(42, off, true);
+          parts.push(new Uint8Array(lh.buffer), name, data); cen.push(new Uint8Array(ch.buffer), name);
+          off += 30 + name.length + data.length;
+        }
+        const cenLen = cen.reduce((a, b) => a + b.length, 0);
+        const end = new DataView(new ArrayBuffer(22)); end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true); end.setUint32(12, cenLen, true); end.setUint32(16, off, true);
+        const all = [...parts, ...cen, new Uint8Array(end.buffer)];
+        const outb = new Uint8Array(all.reduce((a, b) => a + b.length, 0)); let p = 0; for (const b of all) { outb.set(b, p); p += b.length; }
+        return outb;
+      };
+      const docx = zipStore([
+        ['[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+        ['_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
+        ['word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>ドロップしたワード</w:t></w:r></w:p></w:body></w:document>']
+      ]);
+      const sk2 = [];
+      const wd = await F.prepareDropped([{ name: '報告書.docx', bytes: docx }], sk2);
+      const wtx = wd[0] ? (await textOf(wd[0].bytes)).text : '';
+      check(wd[0]?.name === '報告書.pdf' && wtx.normalize('NFKC').replace(/\s/g, '').includes('ドロップしたワード'),
+        `ドロップ：場所がなくても Word を PDF にできる (${wtx.slice(0, 20)} ${sk2.map((x) => x.reason).join()})`);
+      // 変換に中身でも場所でもないものを渡すと断る
+      let refused = false;
+      try { await window.api.convertToPdf({ bytes: 'not bytes', name: 'x.txt' }); } catch { refused = true; }
+      check(refused, '変換に正しくない中身を渡すと断る');
+      check(htx.normalize('NFKC').replace(/\s/g, '').includes('ドロップした見出し'), `ドロップ：場所がなくても HTML を PDF にできる (${htx.slice(0, 20)})`);
     }
 
     // 13. フラット化

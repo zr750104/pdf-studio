@@ -40,6 +40,12 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.22 の変更点
+
+- ウィンドウにドロップした画像・Word（.docx）・テキスト（.txt .md .csv .html .htm）を、1 ファイルずつ PDF にして開く（features.js の droppedKind / prepareDropped / openDropped）。先頭 4KB だけ読んで形式を見分け、対応するものだけ全部読む。テキストは拡張子も確かめる（文字だけの .json や .js までは PDF にしない）。ドロップでは場所が分からないことがあるので、変換は中身（bytes）から行う（main.js の convert-to-pdf は場所のほかに { bytes, name } も受ける）。処理中のドロップは捨てずに順に処理する。対応していないものは理由付きで知らせる
+- インストール不要版：起動したときに `HKCU\Software\Classes\Applications\PDF Studio.exe\shell\open\command` を今の exe に書き直す（defaultapp.js の repairPortableOpenWith）。新しい版を別のフォルダーに展開すると、ダブルクリックで古い場所の exe を探して開かなくなっていたため。「プログラムから開く」で選ばれたことがない（登録がない）とき、登録先がインストール版のとき、前に書いた版（PDFStudioVersion。書いたときの exe の PDFStudioExe が今の登録と同じときだけ信用する）が今より新しくその exe があるときは書き直さない。native-reg で直接書く（外部プログラムは起動しない）。ログに場所は書かない。書いている途中でアプリが止められた（セキュリティソフトなど）ときに毎回繰り返さないよう、書く前に userData に `portable-openwith.pending` を作り、書き終えたら消す（残っていたら二度と試さない）
+- 自動テスト（--selftest）はウィンドウを見えなくして裏で動かす（不透明度 1%・マウス素通り・フォーカスを奪わない・App Nap を止める・画面はフォーカスがあるものとして動かす）。見たいときは `PDFSTUDIO_TEST_VISIBLE=1`。180 秒進まなければ止まった場所を出して終わる。予定していない保存の確認は出さずに失敗として数える
+
 ## 1.5.21 の変更点
 
 - 表示倍率の範囲を 8.33%〜6400%（PDF-XChange Editor と同じ）にした。大きく拡大しても、ページ全体の画像は画素数の上限内で描き、見えている部分だけを細かく描く（1.5.19 の仕組み）。全ページを並べた高さが画面の部品の上限（約 3,000 万ピクセル）を超えないよう、ページが多い文書では上限の倍率を下げる（viewer.js clampScale。ページの追加・並べ方の切り替え・ページの大きさが分かったときも applySizes で収め直す）。回転したスキャン画像のページは細かい画像を作らないため、大きく拡大するとぼやける

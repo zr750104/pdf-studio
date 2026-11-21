@@ -3,6 +3,7 @@ const { app, BrowserWindow, WebContentsView, Menu, dialog, ipcMain, protocol, ne
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const updater = require('./updater');
 const i18n = require('./i18n');
@@ -19,6 +20,39 @@ const PERFTEST = process.argv.includes('--perftest');
 const SELFTEST = process.argv.includes('--selftest') || PERFTEST;
 const selftestQueue = { open: [], save: [], folder: [], message: [], askSave: [] };
 const fromQueue = (k) => (SELFTEST && selftestQueue[k].length ? { hit: true, v: selftestQueue[k].shift() } : { hit: false });
+// 自動テストは、ウィンドウを見えなくして裏で動かす（画面を占有せず、フォーカスも奪わない）。
+// 描画は止めない（見えないウィンドウの描画が間引かれると、表示を待つテストが進まなくなる）。
+// 様子を見たいときは PDFSTUDIO_TEST_VISIBLE=1 で起動する
+const TEST_HIDDEN = SELFTEST && process.env.PDFSTUDIO_TEST_VISIBLE !== '1';
+if (TEST_HIDDEN) {
+  for (const sw of ['disable-renderer-backgrounding', 'disable-backgrounding-occluded-windows', 'disable-background-timer-throttling']) app.commandLine.appendSwitch(sw);
+  // ウィンドウを前に出さない（そのウィンドウで表示中のタブの画面へフォーカスだけ移す）
+  BrowserWindow.prototype.focus = function focusInBackground() {
+    const wc = hosts.get(this.id)?.active?.wc;
+    if (wc && !wc.isDestroyed()) wc.focus(); else this.webContents?.focus();
+  };
+  if (process.platform === 'darwin') app.dock?.hide();
+  // 見えないアプリは Mac の省電力（App Nap）でタイマーが間引かれ、テストが止まることがあるので止めない
+  app.whenReady().then(() => require('electron').powerSaveBlocker.start('prevent-app-suspension'));
+}
+// 自動テストが途中で止まったら、どこで止まったかを出して終わる（黙って待ち続けないように）
+const testWatch = { last: Date.now(), line: '（まだ何も確かめていない）', unexpected: 0 };
+if (SELFTEST && !PERFTEST) {
+  const LIMIT = 180_000;
+  setInterval(() => {
+    if (Date.now() - testWatch.last < LIMIT) return;
+    process.stdout.write(`❌ 自動テストが止まりました: 「${testWatch.line}」のあと ${LIMIT / 1000} 秒進みません\n`);
+    app.exit(2);
+  }, 10_000).unref?.();
+}
+/** 自動テストのウィンドウを見えなくし、マウスも素通りさせる（描画は続く） */
+function hideForTest(win) {
+  if (!TEST_HIDDEN) return;
+  // 不透明度 0 だと Mac が描画を止めることがあるので、目には見えないほど薄くする
+  win.setOpacity(0.01);
+  win.setIgnoreMouseEvents(true);
+  win.setSkipTaskbar(true);
+}
 // ---------------------------------------------------------------- ウィンドウとタブ
 // 1 つのウィンドウに複数の文書をタブで開く。タブごとに文書の画面（renderer/index.html）を
 // WebContentsView で持ち、ウィンドウ自身の画面はタブバー（renderer/tabs.html）にする。
@@ -56,6 +90,7 @@ function createWindow(initial = null, { empty = false } = {}) {
   const host = { win, tabs: [], active: null, mode: 'single', panes: [], mru: [], closing: false, forceClose: false, ready: false, pending: [] };
   hosts.set(win.id, host);
   lastHost = host;
+  emulateFocusForTest(win.webContents);
   win.loadURL('app://local/renderer/tabs.html');
   // ウィンドウが表示できるようになってからタブを作る。
   // それより前に作ったタブは、数十秒のあいだ画面が描かれないことがあった（Mac で確認）
@@ -65,7 +100,8 @@ function createWindow(initial = null, { empty = false } = {}) {
   });
   // タブはウィンドウの show の知らせのあとで作る（それより前に作ると描画が止まる）。
   // 知らせがなかなか来ない環境でも、待たずに作ると止まるので、代わりの処理は入れない
-  win.once('ready-to-show', () => win.show());
+  hideForTest(win);
+  win.once('ready-to-show', () => (TEST_HIDDEN ? win.showInactive() : win.show()));
   // 表示されたら画面の位置を合わせ直す（表示前に作ったタブが描かれないままにならないように）
 
   win.on('focus', () => { if (lastHost !== host) { lastHost = host; buildMenu(); } });
@@ -114,8 +150,24 @@ function addTab(host, initial = null, { activate = true } = {}) {
   return tab;
 }
 
+/** 裏で動かす自動テストでは、ウィンドウにフォーカスが無くても、画面はフォーカスがあるものとして動かす
+ *  （無いと、文字の選択やドラッグなどがフォーカスのある時と違う動きになる） */
+function emulateFocusForTest(wc) {
+  if (!TEST_HIDDEN) return;
+  wc.setBackgroundThrottling(false);
+  const on = () => {
+    try {
+      if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
+      wc.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+    } catch { /* 使えなくてもテストは続ける */ }
+  };
+  on();
+  wc.on('did-finish-load', on);
+}
+
 function setupDocContents(tab) {
   const wc = tab.wc;
+  emulateFocusForTest(wc);
   if (SELFTEST) {
     wc.on('console-message', (e) => {
       const d = process.env.PDFSTUDIO_TEST_OUT || path.join(os.tmpdir(), 'pdfstudio-test');
@@ -297,6 +349,13 @@ async function askSave(win, tab = null, { force = false } = {}) {
     // 自動テスト：数字だけなら選んだボタン、{ r, remember } なら「今後は確認しない」にも印を付けた
     if (typeof q.v === 'object') ({ r: response, remember: checkboxChecked } = q.v);
     else response = q.v;
+  } else if (SELFTEST) {
+    // 自動テストで予定していない確認：本物の画面は出さずに（見えないウィンドウで止まらないように）キャンセルとして記録する
+    const line = `❌ 自動テストで予定していない「変更内容を保存しますか？」の確認 (${tab ? tabLabel(tab) : '-'})`;
+    process.stdout.write(line + '\n');
+    try { fs.appendFileSync(path.join(process.env.PDFSTUDIO_TEST_OUT || path.join(os.tmpdir(), 'pdfstudio-test'), 'log.txt'), line + '\n'); } catch { /* 書けなくても続ける */ }
+    testWatch.unexpected++; // テストの終わりに失敗として数える
+    response = 2;
   } else {
     ({ response, checkboxChecked } = await dialog.showMessageBox(win, {
       type: 'warning',
@@ -914,7 +973,24 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     fs.writeFileSync(path.join(d, arg + '.png'), img.toPNG());
     return true;
   }
+  if (cmd === 'portable-openwith') {
+    // インストール不要版の「プログラムから開く」の書き直しを決める部分（レジストリには触れない）
+    const d = (o) => defaultapp.decidePortableOpenWith({ exe: 'D:\\new\\PDF Studio.exe', version: '1.5.22', exists: true, registeredIsInstalled: false, registeredVersion: null, ...o });
+    return {
+      parse: [defaultapp.exeFromCommand('"C:\\a b\\PDF Studio.exe" "%1"'), defaultapp.exeFromCommand('C:\\x\\PDF Studio.exe %1'), defaultapp.exeFromCommand(null)],
+      cases: [
+        d({ registeredExe: null }), d({ registeredExe: 'D:/new/./PDF Studio.exe' }),
+        d({ registeredExe: 'd:\\NEW\\pdf studio.exe' }), d({ registeredExe: 'D:\\old\\PDF Studio.exe', exists: false }),
+        d({ registeredExe: 'C:\\inst\\PDF Studio.exe', registeredIsInstalled: true }),
+        d({ registeredExe: 'D:\\old\\PDF Studio.exe', registeredVersion: '1.5.21' }), d({ registeredExe: 'D:\\new2\\PDF Studio.exe', registeredVersion: '1.5.30' }),
+        d({ registeredExe: 'D:\\new2\\PDF Studio.exe', registeredVersion: '1.5.30', exists: false })
+      ],
+      cmp: [defaultapp.compareVersion('1.5.10', '1.5.9'), defaultapp.compareVersion('1.5.9', '1.5.10'), defaultapp.compareVersion('1.5.9', '1.5.9'), defaultapp.compareVersion('1.5.22-beta.1', '1.5.22')]
+    };
+  }
   if (cmd === 'log') {
+    testWatch.last = Date.now();
+    testWatch.line = String(arg).slice(0, 200);
     process.stdout.write(arg + '\n');
     const d = process.env.PDFSTUDIO_TEST_OUT || path.join(os.tmpdir(), 'pdfstudio-test');
     fs.appendFileSync(path.join(d, 'log.txt'), arg + '\n');
@@ -935,7 +1011,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     return { self: e.sender.getOSProcessId(), total: mb(m.reduce((s, x) => s + x.memory.workingSetSize, 0)), byType: Object.fromEntries(m.map((x) => [x.type + '-' + x.pid, mb(x.memory.workingSetSize)])) };
   }
   if (cmd === 'done') {
-    let code = arg ? 1 : 0;
+    let code = arg || testWatch.unexpected ? 1 : 0;
     // 最後に、このウィンドウで最後のタブを閉じても空のタブが残る（アプリが終わらない）ことを確かめる
     const host = entry.host;
     if (!PERFTEST && host.ready && host.tabs.length === 1 && !entry.empty) {
@@ -962,8 +1038,8 @@ ipcMain.handle('message-box', async (e, opts) => {
 });
 
 /** テキストファイルを読む。文字コードを判定する（BOM 付き UTF-16 / UTF-8 / それ以外は Shift_JIS） */
-function readText(filePath) {
-  const buf = fs.readFileSync(filePath);
+function readText(src) {
+  const buf = Buffer.isBuffer(src) ? src : fs.readFileSync(src);
   if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
   if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
   try {
@@ -974,17 +1050,22 @@ function readText(filePath) {
 }
 
 // 文書ファイル（Word / テキスト / HTML）→ PDF 変換（Chromium の印刷機能を使用）
-ipcMain.handle('convert-to-pdf', async (e, filePath) => {
-  const ext = path.extname(filePath).toLowerCase();
+// src はファイルの場所、または { bytes, name }（ドラッグ＆ドロップなど、場所が分からないとき）
+ipcMain.handle('convert-to-pdf', async (e, src) => {
+  const byBytes = src !== null && typeof src === 'object';
+  if (byBytes ? !ArrayBuffer.isView(src.bytes) : typeof src !== 'string') throw new Error('invalid source');
+  const ext = path.extname(byBytes ? String(src.name || '') : src).toLowerCase();
+  // 受け取った中身はコピーせずに使う
+  const input = byBytes ? Buffer.from(src.bytes.buffer, src.bytes.byteOffset, src.bytes.byteLength) : src;
   let html;
   if (ext === '.docx') {
     const mammoth = require('mammoth');
-    const r = await mammoth.convertToHtml({ path: filePath });
+    const r = await mammoth.convertToHtml(byBytes ? { buffer: input } : { path: input });
     html = r.value;
   } else if (ext === '.html' || ext === '.htm') {
-    html = readText(filePath);
+    html = readText(input);
   } else {
-    const t = readText(filePath);
+    const t = readText(input);
     html = '<pre>' + t.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>';
   }
   const full = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -992,7 +1073,8 @@ ipcMain.handle('convert-to-pdf', async (e, filePath) => {
     pre{white-space:pre-wrap;font-family:inherit}
     img{max-width:100%} table{border-collapse:collapse} td,th{border:1px solid #999;padding:4px}
   </style></head><body>${html}</body></html>`;
-  const tmp = path.join(os.tmpdir(), `pdfstudio-${Date.now()}.html`);
+  // 同時に変換しても名前がぶつからないように乱数を付ける
+  const tmp = path.join(os.tmpdir(), `pdfstudio-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.html`);
   fs.writeFileSync(tmp, full);
   const w = new BrowserWindow({ show: false, webPreferences: { javascript: false } });
   try {
@@ -1114,6 +1196,8 @@ if (!app.requestSingleInstanceLock()) {
       updater.startAutoCheck();
       // TIFF の既定のアプリが PDF Studio でなければ設定の手順を案内する（ほかの起動時のお知らせと重ならないよう遅らせる）
       setTimeout(() => defaultapp.checkTiffDefault({ installed: updater.isInstalled(), log: updater.log }).catch((e) => updater.log('ERROR', e)), 12000);
+      // インストール不要版：新しい版のフォルダーで起動したら、ダブルクリックで開くアプリの場所を書き直す
+      if (!updater.isInstalled()) setTimeout(() => defaultapp.repairPortableOpenWith({ log: updater.log, findInstalls: updater.findInstalls }), 3000);
       // 別の場所にも入っていないか（古い版のショートカットから起動してしまうのを防ぐ）
       setTimeout(() => updater.checkDuplicateInstalls().catch(() => {}), 4000);
       // 更新のあとインストーラーから起動されたときは、更新できたことを知らせる

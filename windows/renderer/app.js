@@ -173,12 +173,17 @@ async function init() {
   document.addEventListener('drop', async (e) => {
     e.preventDefault();
     if (modalOpen()) return;
-    const files = [...e.dataTransfer.files].filter((f) => /\.(pdf|tiff?)$/i.test(f.name));
-    for (const [k, f] of files.entries()) {
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      if (!hasDoc() && k === 0) await F.openHere(bytes, null, f.name);
-      else await window.api.openInNewWindow(bytes, f.name, null);
+    // 先頭だけ読んで形式を見分け、開ける・PDF にできるファイルだけ全部読む（大きな動画などを丸ごと読まないように）
+    const files = [];
+    for (const f of [...e.dataTransfer.files]) {
+      try {
+        const head = new Uint8Array(await f.slice(0, 4097).arrayBuffer());
+        files.push({ name: f.name, bytes: F.droppedKind(f.name, head) ? new Uint8Array(await f.arrayBuffer()) : head });
+      } catch {
+        files.push({ name: f.name, bytes: new Uint8Array(0) }); // フォルダーなど読めないもの
+      }
     }
+    await F.openDropped(files);
   });
 
   // ようこそ画面

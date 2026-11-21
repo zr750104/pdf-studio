@@ -171,7 +171,7 @@ export async function sourcesToPdf(files, skipped = []) {
         await addTiffPages(out, f.bytes);
         continue;
       } else {
-        src = await PDFDocument.load(await window.api.convertToPdf(f.path));
+        src = await PDFDocument.load(await window.api.convertToPdf(f.path || { bytes: f.bytes, name: f.name }));
       }
       // 壊れた PDF は読み込めても、ページを写すときに失敗することがある
       const pages = await out.copyPages(src, src.getPageIndices());
@@ -194,6 +194,58 @@ async function reportSkipped(skipped) {
   const lines = skipped.slice(0, 10).map((x) => `- ${x.name} — ${x.reason}`);
   if (skipped.length > 10) lines.push(`… +${skipped.length - 10}`);
   await alertBox(t('次のファイルは PDF にできませんでした'), lines.join('\n') + '\n\n' + t('対応している形式: PDF・画像（PNG / JPEG / GIF / BMP / WebP / TIFF）・Word（.docx）・テキスト（.txt / .md / .csv / .html）'));
+}
+
+// ---------------------------------------------------------------- ドラッグ＆ドロップ
+
+// ドロップで PDF にする形式。テキストは拡張子も確かめる（文字だけの .json や .js などまで PDF にしないように）
+const DROP_TEXT_EXT = /\.(txt|md|csv|html?)$/i;
+const isDropPdfOrTiff = (name) => /\.(pdf|tiff?)$/i.test(name);
+
+/** ドロップされたファイルのうち、PDF にして開くものか（先頭のバイトだけで決める） */
+export function droppedKind(name, head) {
+  if (isDropPdfOrTiff(name)) return 'open';
+  const kind = sniffKind(name, head);
+  if (kind === 'text') return DROP_TEXT_EXT.test(name) ? 'text' : null;
+  return kind;
+}
+
+/** ドロップされたファイルを開く形にそろえる。PDF・TIFF はそのまま、画像・Word・テキストは 1 ファイルずつ PDF にする */
+export async function prepareDropped(files, skipped = []) {
+  const items = [];
+  for (const f of files) {
+    const kind = droppedKind(f.name, f.bytes || new Uint8Array(0));
+    if (kind === 'open') { items.push({ bytes: f.bytes, name: f.name, converted: false }); continue; }
+    if (!kind) { skipped.push({ name: f.name, reason: t('対応していない形式') }); continue; }
+    // 場所は使わずに中身から変換する（ドロップでは場所が分からないことがある）
+    const doc = await sourcesToPdf([{ name: f.name, bytes: f.bytes }], skipped);
+    if (doc.getPageCount()) items.push({ bytes: await doc.save(), name: `${baseName(f.name)}.pdf`, converted: true });
+  }
+  return items;
+}
+
+let dropQueue = Promise.resolve();
+/** ドロップされたファイルを開く。files は { name, bytes } の並び（対応していない形式は先頭だけでよい）。
+ *  前のドロップを処理している途中なら、終わってから続けて処理する（捨てない） */
+export function openDropped(files) {
+  if (!files.length) return dropQueue;
+  // 失敗しても列は必ず元に戻す（次のドロップが止まらないように）
+  dropQueue = dropQueue.then(() => openDroppedNow(files))
+    .catch((e) => alertBox('PDF を開けませんでした', e?.message || String(e)))
+    .catch(() => {});
+  return dropQueue;
+}
+
+async function openDroppedNow(files) {
+  const skipped = [];
+  const items = await prepareDropped(files, skipped);
+  // 結果を新しいタブで開くと、このタブのお知らせは見えなくなるので、先に知らせる
+  await reportSkipped(skipped);
+  for (const it of items) {
+    if (it.converted) await openResult(it.bytes, it.name);
+    else if (!hasDoc()) await openHere(it.bytes, null, it.name);
+    else await window.api.openInNewWindow(it.bytes, it.name, null);
+  }
 }
 
 export async function createFromFiles() {
