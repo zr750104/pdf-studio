@@ -46,8 +46,54 @@ export const pageCount = () => state.pageIds.length;
 
 export function setDirty(d = true) {
   state.dirty = d;
+  if (d) scheduleRecovery(); else { clearTimeout(recovery.timer); recovery.timer = null; }
   window.api.setDirty(d);
   window.api.setTitle(`${d ? '● ' : ''}${t(state.name)} - PDF Studio`);
+}
+
+// ---------------------------------------------------------------- 異常終了時の写し
+// 保存していない変更があると、少し待ってから写しを作ってアプリに渡す（復元用フォルダーに書かれる）。
+// 写しを作るのに時間がかかる大きな文書ほど間隔を空ける（作るのにかかった時間の 20 倍、最短 30 秒）。
+// パスワードで保護された文書は、保存するときと同じく暗号化した写しになる
+const recovery = { timer: null, cost: 0, running: false, promise: null };
+/** 写しを lib から作っている最中なら、終わるまで待つ（ページ操作・保存が lib を同時に書き換えないように） */
+const whenRecoveryIdle = () => recovery.promise || Promise.resolve();
+let busyProbe = () => false;
+/** 画面側の「ほかの操作をしている最中か」を教えてもらう（その間は写しを作らない） */
+export function setBusyProbe(fn) { busyProbe = fn; }
+function scheduleRecovery(delayOverride = null) {
+  if (recovery.timer || !window.api?.recoverySave) return;
+  // 最初は大きさに応じて（1MB あたり 1 秒、最短 30 秒）、2 回目からは前に作ったときの時間の 20 倍
+  const sizeMs = (state.bytes?.length || 0) / 1048576 * 1000;
+  const delay = delayOverride ?? window.__recoveryDelay ?? Math.max(30000, sizeMs, recovery.cost * 20);
+  recovery.timer = setTimeout(async () => {
+    recovery.timer = null;
+    if (!state.dirty || !hasDoc()) return;
+    // ほかの操作の途中（ページ構成の変更・保存など）は、終わってから作る
+    if (recovery.running || busyProbe() || state.libFor !== state.pdf) { scheduleRecovery(window.__recoveryDelay ?? 5000); return; }
+    recovery.running = true;
+    const t0 = performance.now();
+    let done;
+    try {
+      // 開いた時点の中身（state.bytes）と注釈から作り、編集中の lib には触れない。
+      // フォームに入力していて lib にしかない内容があるときだけ lib から作る（その間、ページ操作・保存は待たせる）
+      let bytes;
+      if (state.formDirty) {
+        recovery.promise = new Promise((r) => { done = r; });
+        bytes = await buildOutput({ fromRecovery: true });
+      } else {
+        bytes = await buildOutput({ base: state.bytes.slice(), objects: state.objects, pageIds: [...state.pageIds] });
+      }
+      recovery.cost = performance.now() - t0;
+      if (state.dirty) await window.api.recoverySave(bytes, { name: state.name });
+    } catch (e) {
+      window.api.logError?.('handled', { message: `recovery: ${e?.message}`, stack: `recovery: ${e?.stack || e}` });
+    } finally {
+      recovery.running = false;
+      recovery.promise = null;
+      done?.();
+    }
+  }, delay);
 }
 
 // ---------------------------------------------------------------- 権限（作成者による制限）
@@ -602,6 +648,7 @@ function trimUndo() {
 }
 
 async function restore(s, { force = false } = {}) {
+  await whenRecoveryIdle();
   const structural = force || s.bytes !== state.bytes;
   state.pageIds = [...s.pageIds];
   state.objects = { ...s.objects };
@@ -622,6 +669,7 @@ async function restore(s, { force = false } = {}) {
 
 /** ページ構造の変更（pdf-lib で編集して再読み込み） */
 export async function changeStructure(fn) {
+  await whenRecoveryIdle();
   if (state.formDirty) {
     state.bytes = await saveLib();
     state.formDirty = false;
@@ -1028,13 +1076,15 @@ async function addAnnotation(doc, page, pageRefs, o) {
  * 保存用バイト列を作る
  * @param {object} opt flatten: 注釈をページに焼き込む / security: 暗号化設定
  */
-export async function buildOutput({ flatten = false, security = state.security, objects = state.objects } = {}) {
-  const base = await saveLib();
+export async function buildOutput({ flatten = false, security = state.security, objects = state.objects, base = null, pageIds = state.pageIds, fromRecovery = false } = {}) {
+  // base を渡すと state.lib には触れずにそこから作る（異常終了時の写し用。編集中の lib を書き換えないように）
+  if (!base && !fromRecovery) await whenRecoveryIdle();
+  base = base || await saveLib();
   const doc = await PDFDocument.load(base, { updateMetadata: false });
   const pages = doc.getPages();
   const pageRefs = pages.map((p) => p.ref);
   for (let i = 0; i < pages.length; i++) {
-    const list = objects[state.pageIds[i]] || [];
+    const list = objects[pageIds[i]] || [];
     for (const o of list) {
       if (flatten) {
         if (o.type === 'link') { await addAnnotation(doc, pages[i], pageRefs, o); continue; }

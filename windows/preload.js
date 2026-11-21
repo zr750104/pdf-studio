@@ -30,5 +30,13 @@ contextBridge.exposeInMainWorld('api', {
   logError: (source, err) => ipcRenderer.send('log-error', source, err),
   logInfo: (msg) => ipcRenderer.send('log-info', msg),
   onLang: (cb) => ipcRenderer.on('lang', (e, l) => cb(l)),
-  onToast: (cb) => ipcRenderer.on('toast', (e, m) => cb(m))
+  onToast: (cb) => ipcRenderer.on('toast', (e, m) => cb(m)),
+  // 最近使ったファイル・前回の続き・異常終了時の復元
+  docSource: (p) => ipcRenderer.send('doc-source', p),
+  docView: (v) => ipcRenderer.send('doc-view', v),
+  recentFiles: () => ipcRenderer.invoke('recent-files'),
+  openRecent: (p) => ipcRenderer.invoke('open-recent', p),
+  onRecentChanged: (cb) => ipcRenderer.on('recent-changed', () => cb()),
+  recoverySave: (bytes, meta) => ipcRenderer.invoke('recovery-save', bytes, meta),
+  recoveryOpened: () => ipcRenderer.send('recovery-opened')
 });

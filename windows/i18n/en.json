@@ -581,7 +581,19 @@
   "閉じるときの保存の確認": "Save Prompt When Closing",
   "毎回確かめる": "Ask Every Time",
   "確かめずに保存する": "Save Without Asking",
-  "確かめずに保存しない（変更は失われます）": "Don't Save Without Asking (changes are lost)"
+  "確かめずに保存しない（変更は失われます）": "Don't Save Without Asking (changes are lost)",
+  "ファイルが見つかりません（移動または削除された可能性があります）": "File not found (it may have been moved or deleted)",
+  "最近使ったファイル": "Recent Files",
+  "（なし）": "(None)",
+  "一覧を消去": "Clear List",
+  "起動時に前回のファイルを開く": "Reopen Previous Files at Startup",
+  "復元する": "Restore",
+  "破棄する": "Discard",
+  "後で決める": "Decide Later",
+  "前回 PDF Studio が正しく終了しなかったため、保存していない文書が残っています": "PDF Studio did not close properly last time, and some unsaved documents were kept",
+  "「復元する」を選ぶと、保存していない状態で開きます。内容を確かめてから保存してください。": "Choose \"Restore\" to open them as unsaved documents. Check the contents, then save.",
+  "ここに PDF・画像・Word などのファイルをドラッグ＆ドロップしても開けます": "You can also drag and drop PDF, image, Word and other files here",
+  "前回保存していなかった文書を復元しました。内容を確かめてから保存してください。": "Restored a document that was not saved last time. Check the contents, then save."
  },
  "patterns": [
   [

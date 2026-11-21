@@ -1165,6 +1165,107 @@ async function tabTests() {
   await tab({ do: 'focus-self' });
 }
 
+// 最近使ったファイル・前回の続き・異常終了時の復元
+async function sessionTests(out) {
+  const ses = (arg) => api.selftest('session', arg);
+  const info = () => api.selftest('tabs');
+  const tab = (arg) => api.selftest('tab', arg);
+  const until = async (fn, ms = 8000) => { const t0 = performance.now(); while (performance.now() - t0 < ms) { if (await fn()) return true; await sleep(100); } return false; };
+  const self = (await info()).self;
+  const closeOthers = async () => { for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id }); for (const id of (await info()).others || []) await tab({ do: 'close-any', id }); };
+
+  // 最近使ったファイル：開いた・保存したファイルが先頭に入り、重ならない
+  await ses({ do: 'clear-recent' });
+  const pa = `${out}/recent-a.pdf`, pb = `${out}/recent-b.pdf`;
+  await api.writeFile(pa, await makeSample());
+  await api.writeFile(pb, await makeSample());
+  await F.openHere(await makeSample(), pa, 'recent-a.pdf');
+  await ready();
+  await sleep(200);
+  let st = await ses({ do: 'state' });
+  check(st.recent.length === 1 && st.recent[0].endsWith('recent-a.pdf') && st.tab.path?.endsWith('recent-a.pdf'), `最近使ったファイル：開いたファイルが入る (${st.recent.map((p) => p.split(/[\\/]/).pop()).join(', ')})`);
+  queue('save', pb);
+  await F.saveAs();
+  await sleep(200);
+  await F.openHere(await makeSample(), pa, 'recent-a.pdf');
+  await sleep(200);
+  st = await ses({ do: 'state' });
+  check(st.recent.map((p) => p.split(/[\\/]/).pop()).join() === 'recent-a.pdf,recent-b.pdf', `最近使ったファイル：保存した場所も入り、同じファイルは先頭に移る (${st.recent.map((p) => p.split(/[\\/]/).pop()).join(', ')})`);
+  const menu = await ses({ do: 'menu-recent' });
+  check(menu && menu.filter((x) => x.label.includes('recent-')).length === 2 && menu.some((x) => x.type === 'checkbox' && x.checked), `最近使ったファイル：メニューに並び、前回の続きは既定でオン (${menu?.map((x) => x.label).join(' / ')})`);
+  // ようこそ画面にも出る（何も開いていない画面で確かめる）
+  const welcome = await new Promise((r) => setTimeout(async () => r(document.querySelectorAll('#welcome-recent .recent-item').length), 300));
+  check(welcome === 2 && !document.getElementById('welcome-recent').hidden, `最近使ったファイル：ようこそ画面に並ぶ (${welcome})`);
+  // 見つからないファイルは一覧から外す
+  await ses({ do: 'set', key: 'recent', value: [...st.recent, `${out}/no-such-file.pdf`] });
+  const okMissing = await ses({ do: 'open-recent', path: `${out}/no-such-file.pdf` });
+  st = await ses({ do: 'state' });
+  check(okMissing === false && st.recent.length === 2, `最近使ったファイル：見つからないファイルは開かずに一覧から外す (${st.recent.length})`);
+
+  // 前回の続き：開いているファイル・ページ・倍率を覚える
+  zoomTo(1.5);
+  scrollToPage(2, false);
+  await sleep(1200);
+  st = await ses({ do: 'state' });
+  const rec = st.session?.windows?.[0]?.tabs?.find((x) => x.path.endsWith('recent-a.pdf'));
+  check(rec && rec.page === 2 && Math.abs(rec.scale - 1.5) < 0.01, `前回の続き：ファイル・ページ・倍率を覚える (${JSON.stringify(rec)})`);
+  // 開き直すと同じページ・倍率になる（テストでは今のウィンドウのタブとして開く）
+  const rs = await ses({ do: 'restore' });
+  const restored = rs.tabs.find((x) => x.path?.endsWith('recent-a.pdf'));
+  let rv = null;
+  if (restored) {
+    // 後ろのタブとして開くので、表示してから確かめる（表示されたときに戻す）
+    await tab({ do: 'activate', id: restored.id });
+    await until(async () => (await tab({ do: 'eval-any', id: restored.id, js: "document.body.classList.contains('has-doc')" })));
+    await sleep(1500);
+    rv = await tab({ do: 'eval-any', id: restored.id, js: "JSON.stringify({ scale: window.__view?.scale, page: window.__currentPage?.() })" });
+  }
+  check(rs.ok && restored && rv && JSON.parse(rv).page === 2 && Math.abs(JSON.parse(rv).scale - 1.5) < 0.01, `前回の続き：開き直すと同じファイル・ページ・倍率になる (${rv})`);
+  for (const x of rs.tabs) await tab({ do: 'close-any', id: x.id });
+  await tab({ do: 'activate', id: self });
+  await ses({ do: 'set', key: 'restoreSession', value: false });
+  const menuOff = await ses({ do: 'menu-recent' });
+  check(menuOff?.some((x) => x.type === 'checkbox' && !x.checked), '前回の続き：メニューで切れる');
+  await ses({ do: 'set', key: 'restoreSession', value: true });
+
+  // 異常終了時の復元：変更があると写しを作り、保存すると消す
+  window.__recoveryDelay = 100;
+  const nObj = objs(0).length;
+  const recObj = addObject(0, { type: 'ink', strokes: [[[100, 100], [200, 100]]], rect: [98, 98, 104, 4], color: '#000', width: 2, opacity: 1 });
+  const made = await until(async () => (await ses({ do: 'state' })).tab.recoverySaved, 5000);
+  st = await ses({ do: 'state' });
+  check(made && st.recovery.some((n) => n.startsWith(st.runId) && n.endsWith('.pdf')), `異常終了時の復元：保存していない変更の写しを作る (${st.recovery.length} 個)`);
+  queue('save', pb);
+  await F.saveAs();
+  await sleep(300);
+  st = await ses({ do: 'state' });
+  check(!st.tab.recoverySaved && !st.recovery.some((n) => n.startsWith(st.runId)), `異常終了時の復元：保存すると写しを消す (${st.recovery.length} 個)`);
+  removeObject(recObj.id);
+  window.__recoveryDelay = undefined;
+  check(objs(0).length === nObj, '異常終了時の復元：テストの注釈を戻す');
+
+  // 前回正しく終了しなかったときの写し：「後で」は残す、「復元する」は保存していない状態で開いて写しを消す
+  const left = await ses({ do: 'fake-leftover', bytes: await makeSample(), name: '復元テスト.pdf', n: 1 });
+  let of = await ses({ do: 'offer', answer: 2 });
+  check(left === 1 && of.r === 2 && of.left === 1 && !of.opened.length, `異常終了時の復元：「後で決める」は写しを残す (${JSON.stringify(of)})`);
+  of = await ses({ do: 'offer', answer: 0 });
+  const rt = of.opened.find((x) => x.title.includes('復元テスト'));
+  check(of.left === 0 && rt && rt.dirty && rt.path === null, `異常終了時の復元：「復元する」は保存していない状態で開く（保存先は聞く） (${JSON.stringify(of.opened)})`);
+  st = await ses({ do: 'state' });
+  check(st.recovery.some((n) => n.startsWith('old-run_1')), `異常終了時の復元：開いた直後は元の写しを残す (${st.recovery.join(', ')})`);
+  if (rt) { await queue('askSave', 1); await tab({ do: 'request-close-any', id: rt.id }); }
+  await sleep(200);
+  st = await ses({ do: 'state' });
+  check(!st.recovery.some((n) => n.startsWith('old-run_1')), `異常終了時の復元：閉じると元の写しを消す (${st.recovery.join(', ')})`);
+  await ses({ do: 'fake-leftover', bytes: await makeSample(), name: '破棄テスト.pdf', n: 2 });
+  of = await ses({ do: 'offer', answer: 1 });
+  check(of.left === 0 && !of.opened.length, `異常終了時の復元：「破棄する」は開かずに写しを消す (${JSON.stringify(of)})`);
+  await tab({ do: 'activate', id: self });
+  await sleep(300);
+  const fin = await info();
+  for (const x of fin.tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+}
+
 async function layoutTests() {
   await openBytes(await makeSample(), { name: 'layout.pdf', askPassword: async () => null });
   await ready();
@@ -1264,8 +1365,10 @@ export async function run() {
     const only = new URLSearchParams(location.search).get('only');
     if (only === 'tabs') { await tabTests(); throw new Error('__only__'); }
     if (only === 'scan') { await scanFastTests(); throw new Error('__only__'); }
+    if (only === 'session') { await sessionTests(out); throw new Error('__only__'); }
     await layoutTests();
     await tabTests();
+    await sessionTests(out);
     await rotationTests();
     await measureTests();
     await tiffTests();

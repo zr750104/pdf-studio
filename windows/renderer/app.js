@@ -1,6 +1,6 @@
 // エントリーポイント：画面の初期化・メニュー/キーボードの振り分け
 import { startAutoTranslate, setLang, t } from './i18n.js';
-import { state, bus, hasDoc, undo, redo, setDirty, can } from './doc.js';
+import { state, bus, hasDoc, undo, redo, setDirty, can, setBusyProbe } from './doc.js';
 import { initViewer, buildPages, view, setTool, zoomTo, scrollToPage, currentPage, stepPage, setLayout, select, removeObject, nudgeSelected, TOOLS, DEFAULT_TOOL, finishPoly, cancelPoly, undoPolyPoint, polyActive } from './viewer.js';
 import { initToolbar, initSidebar, initInspector, reloadSidebar, showSearchTab, updateZoomSelect, updateToolAvailability } from './panels.js';
 import * as F from './features.js';
@@ -71,6 +71,7 @@ const ALWAYS = new Set(['zoom-in', 'zoom-out', 'zoom-100', 'zoom-page', 'zoom-wi
 const modalOpen = () => !!document.querySelector('.backdrop');
 
 let busy = false;
+let restoringView = false; // 前回の続きのページ・倍率に戻している途中
 async function run(action) {
   const fn = ACTIONS[action];
   if (!fn) return;
@@ -199,12 +200,84 @@ async function init() {
   // 日本語フォント（注釈の表示用）は裏で読み込み、読み込めたら注釈を描き直す
   Promise.all(['16px "Noto Sans JP"', '16px "Noto Sans Thai"', '700 16px "Noto Sans Thai"'].map((f) => document.fonts.load(f))).then(() => bus.dispatchEvent(new CustomEvent('objects-changed', { detail: { pages: null } }))).catch(() => {});
 
+  // 自動テストから、開き直したタブのページと倍率を確かめられるように
+  window.__view = view;
+  window.__currentPage = currentPage;
+  // 最近使ったファイル（ようこそ画面）
+  renderRecent();
+  window.api.onRecentChanged(() => renderRecent());
+  // 異常終了時の写しは、ほかの操作の途中には作らない
+  setBusyProbe(() => busy);
+  // 前回の続き：見ているページと倍率をアプリに知らせる（少しまとめてから）。
+  // 前のページ・倍率に戻している間は知らせない（開いた直後の「幅に合わせる」で上書きしないように）
+  let viewTimer = null;
+  const reportView = () => {
+    if (restoringView) return;
+    clearTimeout(viewTimer);
+    viewTimer = setTimeout(() => { if (hasDoc()) window.api.docView({ page: currentPage(), scale: view.scale, fit: view.fit || null }); }, 500);
+  };
+  bus.addEventListener('page-changed', reportView);
+  bus.addEventListener('zoom-changed', reportView);
+
   const init = await window.api.getInitial();
   if (init?.error) toast(`開けませんでした: ${init.error}`, 5000);
   else if (init?.bytes) {
     await F.openHere(new Uint8Array(init.bytes), init.path, init.name);
-    if (!init.path && hasDoc()) setDirty(true);
+    if (init.recovered) {
+      // 異常終了時の写しから復元した文書：保存していない状態で開き、元のファイルを知らせる（保存するときは保存先を聞く）
+      if (hasDoc()) {
+        if (init.source) window.api.docSource(init.source);
+        setDirty(true);
+        window.api.recoveryOpened();
+        toast('前回保存していなかった文書を復元しました。内容を確かめてから保存してください。', 6000);
+      }
+    } else if (!init.path && hasDoc()) setDirty(true);
+    if (init.view && hasDoc()) {
+      restoringView = true;
+      try { await restoreView(init.view); } finally { restoringView = false; }
+    }
   }
+}
+
+/** 前回の続き：前に見ていた倍率とページに戻す。
+ *  後ろのタブは表示されるまで画面の大きさが 0 なので、ページが並んで大きさが付いてから戻す */
+async function restoreView(v) {
+  const viewerEl = document.getElementById('viewer');
+  const ok = () => view.pages.length > 0 && viewerEl.clientWidth > 0 && viewerEl.clientHeight > 0;
+  while (!ok()) {
+    if (!hasDoc()) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  // 表示されたときの「幅に合わせる」の計算が終わってから戻す
+  await new Promise((r) => setTimeout(r, 300));
+  if (!hasDoc()) return;
+  if (v.fit === 'width' || v.fit === 'page') zoomTo(view.scale, v.fit);
+  else if (v.scale > 0) zoomTo(v.scale);
+  const page = Math.min(Math.max(0, v.page | 0), state.pageIds.length - 1);
+  if (page > 0) scrollToPage(page, false);
+}
+
+/** ようこそ画面に最近使ったファイルを並べる（ファイル名は訳さない） */
+async function renderRecent() {
+  const box = $('#welcome-recent');
+  if (!box) return;
+  let list = [];
+  try { list = await window.api.recentFiles(); } catch { /* 出せなくても続ける */ }
+  const ul = box.querySelector('ul');
+  ul.replaceChildren(...list.map((f) => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.className = 'recent-item';
+    b.title = f.path;
+    b.setAttribute('translate', 'no');
+    const n = document.createElement('span'); n.className = 'recent-name'; n.textContent = f.name;
+    const d = document.createElement('span'); d.className = 'recent-dir'; d.textContent = f.dir;
+    b.append(n, d);
+    b.addEventListener('click', () => window.api.openRecent(f.path));
+    li.append(b);
+    return li;
+  }));
+  box.hidden = !list.length;
 }
 
 /** イベントから呼ばれる処理も、他の処理と重ならないようにする */

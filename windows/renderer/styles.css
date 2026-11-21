@@ -161,6 +161,13 @@ body.has-doc #welcome { display: none; }
 .welcome-box p { color: var(--muted); }
 .welcome-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 24px 0; }
 .welcome-buttons button { padding: 12px; font-size: 14px; }
+#welcome-recent { text-align: left; margin: 0 0 16px; }
+#welcome-recent h2 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 0 0 6px; }
+#welcome-recent ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.recent-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 6px 10px; text-align: left; background: transparent; border: 1px solid transparent; }
+.recent-item:hover { border-color: var(--accent); }
+.recent-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.recent-dir { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .drop-hint { font-size: 12px; border: 2px dashed var(--border); border-radius: 10px; padding: 18px; }
 
 /* ---------------------------------------------------------------- ページ */

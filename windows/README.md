@@ -40,6 +40,14 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.23 の変更点
+
+- 最近使ったファイル（最大 10 件）：settings.json の `recent`。レンダラーが開いた・保存したときに `doc-source` で元のファイルを知らせる（TIFF は state.path が空でも元の場所を知らせる）。ファイルメニュー（ファイル名は訳さない noTr）・ようこそ画面・ジャンプリスト（app.addRecentDocument）に出す。見つからないファイルは一覧から外して知らせる
+- 前回の続き：場所のあるタブの path・ページ・倍率・fit を settings.json の `session` に書く（doc-view をまとめて送る）。閉じると決まったウィンドウは外し、全部が閉じる（終了）ときは前の記録を残す。起動時にファイルの指定がなければ開き直す（`restoreSession` が false なら開かない。メニューで切り替え）。後ろのタブは表示されて大きさが付いてから倍率とページを戻す（app.js restoreView）
+- 異常終了時の復元：変更があるとレンダラーが写しを作り（最短 30 秒、または buildOutput にかかった時間の 20 倍の間隔。暗号化はそのまま）、main が userData/recovery/<RUN_ID>_<タブ>.pdf/.json に書く。保存した・閉じたら消す。写しは開いた時点の中身（state.bytes）と注釈から作り、編集中の lib には触れない（フォームに入力したときだけ、ほかの操作をしていない間に lib から作る）。画面（レンダラー）が落ちたタブの写しは消さない。起動時に別の RUN_ID の写しがあれば「復元する／破棄する／後で決める」を聞く。復元した文書は保存していない状態・保存先未定（path=null）で開き、開けて新しい写しができた・保存した・閉じたときに元の写しを消す（「破棄する」はすぐ消す）
+- 開く時間の記録：main の `open read`・`ready`、レンダラーの `open timing`（形式・大きさ・ページ数・時間。ファイル名は書かない）
+- 設定ファイルは、読めない（ロック中など）ときは書かない（readSettingsStrict。ほかの設定を消さないように）。壊れていたら settings.json.bak に退避して作り直す。書くときは一時ファイルに書いてから置き換える
+
 ## 1.5.22 の変更点
 
 - ウィンドウにドロップした画像・Word（.docx）・テキスト（.txt .md .csv .html .htm）を、1 ファイルずつ PDF にして開く（features.js の droppedKind / prepareDropped / openDropped）。先頭 4KB だけ読んで形式を見分け、対応するものだけ全部読む。テキストは拡張子も確かめる（文字だけの .json や .js までは PDF にしない）。ドロップでは場所が分からないことがあるので、変換は中身（bytes）から行う（main.js の convert-to-pdf は場所のほかに { bytes, name } も受ける）。処理中のドロップは捨てずに順に処理する。対応していないものは理由付きで知らせる

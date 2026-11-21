@@ -1,6 +1,6 @@
 // メニューから呼ばれる文書操作
 import {
-  state, PL, pdfjsLib, PDFJS_OPTS, hasDoc, pageCount, openBytes, newBlankDocument, buildOutput, changeStructure, setDirty, can, loadLib,
+  state, bus, PL, pdfjsLib, PDFJS_OPTS, hasDoc, pageCount, openBytes, newBlankDocument, buildOutput, changeStructure, setDirty, can, loadLib,
   rotatePages, deletePages, movePages, duplicatePages, insertBlank, insertFromSources, replaceWithImage,
   withDisplaySpace, addInvisibleText, jpFont, textFont, THAI, pageText, hexToRgb, setMetadata, objBounds,
   UNITS, scaleFactor, setMeasureScale, measureValue
@@ -48,8 +48,16 @@ export async function openDialog() {
 
 export async function openHere(bytes, path, name) {
   try {
-    if (isTiff(name)) return await openTiff(bytes, name);
+    const t0 = performance.now();
+    if (isTiff(name)) {
+      await openTiff(bytes, name);
+      if (path) window.api.docSource(path); // TIFF は PDF として保存するので state.path は空のまま。元のファイルだけ知らせる
+      logOpenTime('tiff', bytes, t0);
+      return;
+    }
     await openBytes(bytes, { path, name, askPassword });
+    if (path) window.api.docSource(path);
+    logOpenTime('pdf', bytes, t0);
     if (state.security?.restricted) {
       toast('この文書には作成者による編集の制限があります。許可された操作だけ行えます。', 5000);
     } else if (state.security?.inherited && state.security.user) {
@@ -58,6 +66,23 @@ export async function openHere(bytes, path, name) {
   } catch (e) {
     if (e.message !== 'CANCELLED') await alertBox('PDF を開けませんでした', e.message);
   }
+}
+
+/** 開くまでの時間を記録する（形式・大きさ・ページ数・時間だけ。ファイル名は書かない）。最初のページが描かれた時間も測る */
+function logOpenTime(kind, bytes, t0) {
+  const opened = Math.round(performance.now() - t0);
+  const mb = ((bytes?.length || bytes?.byteLength || 0) / 1048576).toFixed(1);
+  const pages = pageCount();
+  let done = false;
+  const finish = (how) => {
+    if (done) return;
+    done = true;
+    bus.removeEventListener('render-idle', onIdle);
+    window.api.logInfo(`open timing: ${kind} ${mb}MB ${pages}p opened ${opened}ms, first view ${Math.round(performance.now() - t0)}ms (${how}), since start ${Math.round(performance.now())}ms`);
+  };
+  const onIdle = () => finish('idle');
+  bus.addEventListener('render-idle', onIdle);
+  setTimeout(() => finish('timeout'), 20000);
 }
 
 /** TIFF は PDF に変換して開く（保存するときは PDF として保存先を尋ねる） */
@@ -123,6 +148,7 @@ async function writeTo(path) {
     state.path = path;
     state.name = path.split(/[\\/]/).pop();
     setDirty(false);
+    window.api.docSource(path);
     toast('保存しました');
     return true;
   } catch (e) {
