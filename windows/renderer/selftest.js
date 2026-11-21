@@ -1,7 +1,7 @@
 // 自動テスト（`electron . --selftest`）。主要機能を UI 経由で操作し、結果とスクリーンショットを保存する
 import {
   state, PL, pdfjsLib, PDFJS_OPTS, openBytes, buildOutput, jpFont, pageText, undo, redo, changeStructure, insertFromSources,
-  rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib
+  rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib, setDirty
 } from './doc.js';
 import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, clampScale, MAX_SCALE, MIN_SCALE, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation } from './viewer.js';
 import { textStamp, hanko, chooseStamp } from './stamps.js';
@@ -1223,6 +1223,44 @@ async function sessionTests(out) {
   check(rs.ok && restored && rv && JSON.parse(rv).page === 2 && Math.abs(JSON.parse(rv).scale - 1.5) < 0.01, `前回の続き：開き直すと同じファイル・ページ・倍率になる (${rv})`);
   for (const x of rs.tabs) await tab({ do: 'close-any', id: x.id });
   await tab({ do: 'activate', id: self });
+  // 実際の起動と同じく、新しいウィンドウに開き直す（前面のタブはそのまま表示されて戻る）
+  const rn = await ses({ do: 'restore', newWindow: true });
+  const rnTab = rn.tabs.find((x) => x.path?.endsWith('recent-a.pdf'));
+  let rnv = null;
+  if (rnTab) {
+    await until(async () => (await tab({ do: 'eval-any', id: rnTab.id, js: "document.body.classList.contains('has-doc')" })));
+    await sleep(1500);
+    rnv = await tab({ do: 'eval-any', id: rnTab.id, js: "JSON.stringify({ scale: window.__view?.scale, page: window.__currentPage?.() })" });
+  }
+  check(rn.ok && rnTab && rnv && JSON.parse(rnv).page === 2 && Math.abs(JSON.parse(rnv).scale - 1.5) < 0.01, `前回の続き：起動時と同じく新しいウィンドウに開き直す (${rnv}, ウィンドウ ${(await info()).windows})`);
+  const imm = (rn.immediate?.windows || []).flatMap((w) => w.tabs).filter((t) => t.path?.endsWith('recent-a.pdf'));
+  check(imm.length >= 2 && imm.some((t) => t.page === 2), `前回の続き：読み込みが終わる前から記録に入っている (${imm.length} 件)`);
+  for (const x of rn.tabs) await tab({ do: 'close-any', id: x.id });
+  await sleep(300);
+  await tab({ do: 'activate', id: self });
+  // 見つからないファイルは飛ばし、開けるものがなければ開かない
+  await ses({ do: 'set', key: 'session', value: { windows: [{ tabs: [{ path: `${out}/gone.pdf`, page: 0, scale: 1 }], active: 0 }] } });
+  const rg = await ses({ do: 'restore', newWindow: true });
+  check(!rg.ok && rg.tabs.length === 0, `前回の続き：見つからないファイルは開かない (${JSON.stringify(rg)})`);
+  // つながらない場所（ネットワークドライブなど）のファイルは開かずに後回しにし、記録には残す。3 回目で外す
+  {
+    const far = `${out}/unreachable-share/far.pdf`;
+    await ses({ do: 'unreachable', prefix: `${out}/unreachable-share` });
+    await ses({ do: 'set', key: 'session', value: { windows: [{ tabs: [{ path: pa, page: 0, scale: 1 }, { path: far, page: 3, scale: 2 }], active: 0 }] } });
+    const ru = await ses({ do: 'restore', newWindow: true });
+    const kept = (await ses({ do: 'state' })).session?.windows?.flatMap((w) => w.tabs) || [];
+    const farRec = kept.find((t) => t.path === far);
+    check(ru.ok && ru.tabs.length === 1 && ru.tabs[0].path?.endsWith('recent-a.pdf') && farRec && farRec.tries === 1 && farRec.page === 3,
+      `前回の続き：つながらない場所のファイルは開かずに記録に残す (${ru.tabs.map((x) => x.path?.split(/[\\/]/).pop()).join(',')} / ${JSON.stringify(farRec)})`);
+    for (const x of ru.tabs) await tab({ do: 'close-any', id: x.id });
+    await sleep(300);
+    await ses({ do: 'set', key: 'session', value: { windows: [{ tabs: [{ path: far, page: 3, scale: 2, tries: 2 }], active: 0 }] } });
+    const ru2 = await ses({ do: 'restore', newWindow: true });
+    const kept2 = (await ses({ do: 'state' })).session?.windows?.flatMap((w) => w.tabs) || [];
+    check(!ru2.ok && !kept2.some((t) => t.path === far), `前回の続き：3 回続けて開けなければ記録から外す (${JSON.stringify(kept2)})`);
+    await ses({ do: 'unreachable', prefix: null });
+    await tab({ do: 'activate', id: self });
+  }
   await ses({ do: 'set', key: 'restoreSession', value: false });
   const menuOff = await ses({ do: 'menu-recent' });
   check(menuOff?.some((x) => x.type === 'checkbox' && !x.checked), '前回の続き：メニューで切れる');
@@ -1244,6 +1282,25 @@ async function sessionTests(out) {
   window.__recoveryDelay = undefined;
   check(objs(0).length === nObj, '異常終了時の復元：テストの注釈を戻す');
 
+  // TIFF を開いただけ（変換しただけ）では写しを作らず、編集したら作る
+  {
+    window.__recoveryDelay = 100;
+    const tifPath = `${out}/view-only.tif`;
+    await api.writeFile(tifPath, new Uint8Array(await (await fetch('app://local/test/fixtures/multipage.tif')).arrayBuffer()));
+    await F.openHere(new Uint8Array(await (await fetch('app://local/test/fixtures/multipage.tif')).arrayBuffer()), tifPath, 'view-only.tif');
+    await ready();
+    await sleep(800);
+    let ts = await ses({ do: 'state' });
+    check(state.dirty && !ts.tab.recoverySaved, `異常終了時の復元：TIFF を開いただけでは写しを作らない (変更あり ${state.dirty}, 写し ${ts.tab.recoverySaved})`);
+    const o = addObject(0, { type: 'ink', strokes: [[[100, 100], [200, 100]]], rect: [98, 98, 104, 4], color: '#000', width: 2, opacity: 1 });
+    await until(async () => (await ses({ do: 'state' })).tab.recoverySaved, 5000);
+    ts = await ses({ do: 'state' });
+    check(ts.tab.recoverySaved, '異常終了時の復元：TIFF に書き込んだら写しを作る');
+    removeObject(o.id);
+    window.__recoveryDelay = undefined;
+    setDirty(false);
+  }
+
   // 前回正しく終了しなかったときの写し：「後で」は残す、「復元する」は保存していない状態で開いて写しを消す
   const left = await ses({ do: 'fake-leftover', bytes: await makeSample(), name: '復元テスト.pdf', n: 1 });
   let of = await ses({ do: 'offer', answer: 2 });
@@ -1257,6 +1314,21 @@ async function sessionTests(out) {
   await sleep(200);
   st = await ses({ do: 'state' });
   check(!st.recovery.some((n) => n.startsWith('old-run_1')), `異常終了時の復元：閉じると元の写しを消す (${st.recovery.join(', ')})`);
+  // 同じファイルを変更なしで開いていたら、復元したものを開いてからそのタブを閉じる（ウィンドウは閉じない）
+  {
+    await ses({ do: 'open-recent', path: pb });
+    let sameTab = null;
+    await until(async () => (sameTab = (await info()).tabs.find((x) => x.title === 'recent-b.pdf')));
+    await sleep(800);
+    await ses({ do: 'fake-leftover', bytes: await makeSample(), name: 'recent-b.pdf', source: pb, n: 3 });
+    const os = await ses({ do: 'offer', answer: 0 });
+    const after = await info();
+    const rec = os.opened.find((x) => x.title.includes('recent-b'));
+    check(sameTab && rec && rec.dirty && !after.tabs.some((x) => x.id === sameTab.id) && after.windows >= 1 && after.tabs.some((x) => x.id === self),
+      `異常終了時の復元：同じファイルを開いていたタブは、復元したものに置き換える (${JSON.stringify({ same: sameTab?.id, opened: os.opened, tabs: after.tabs.map((x) => x.id) })})`);
+    if (rec) { await queue('askSave', 1); await tab({ do: 'request-close-any', id: rec.id }); }
+    await tab({ do: 'activate', id: self });
+  }
   await ses({ do: 'fake-leftover', bytes: await makeSample(), name: '破棄テスト.pdf', n: 2 });
   of = await ses({ do: 'offer', answer: 1 });
   check(of.left === 0 && !of.opened.length, `異常終了時の復元：「破棄する」は開かずに写しを消す (${JSON.stringify(of)})`);

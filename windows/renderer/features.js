@@ -118,7 +118,7 @@ async function openTiff(bytes, name) {
   tiffStats.stages.openPdf = performance.now() - t;
   const st = Object.entries(tiffStats.stages).map(([k, v]) => `${k}=${Math.round(v)}`).join(' ');
   logTiff(`open: ${Date.now() - t0}ms ${JSON.stringify(tiffStats.info)} ${st}`);
-  setDirty(true);
+  setDirty(true, { converted: true }); // 変換しただけ（編集するまで異常終了時の写しは作らない）
   toast(`TIFF（${pageCount()} ページ）を PDF として開きました。保存すると PDF になります。`, 4000);
 }
 

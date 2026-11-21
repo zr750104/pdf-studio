@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   getInitial: () => ipcRenderer.invoke('get-initial'),
-  setDirty: (d) => ipcRenderer.send('set-dirty', d),
+  setDirty: (d, convertedOnly = false) => ipcRenderer.send('set-dirty', d, convertedOnly),
   setTitle: (t) => ipcRenderer.send('set-title', t),
   closeWindow: () => ipcRenderer.send('close-window'),
   saveCloseFailed: () => ipcRenderer.send('save-close-failed'),

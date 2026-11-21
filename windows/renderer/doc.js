@@ -44,10 +44,15 @@ export const newId = (p = 'o') => `${p}${Date.now().toString(36)}${(idCounter++)
 export const hasDoc = () => !!state.pdf;
 export const pageCount = () => state.pageIds.length;
 
-export function setDirty(d = true) {
+/**
+ * 変更ありの印を付ける・外す。converted: TIFF などを PDF に変換して開いただけ（元のファイルはそのまま残っている）。
+ * その間は異常終了時の写しを作らない（見ただけの文書で重い処理を走らせず、復元も聞かない）。本当に編集したら作る
+ */
+export function setDirty(d = true, { converted = false } = {}) {
   state.dirty = d;
-  if (d) scheduleRecovery(); else { clearTimeout(recovery.timer); recovery.timer = null; }
-  window.api.setDirty(d);
+  state.convertedOnly = d && converted;
+  if (d && !converted) scheduleRecovery(); else { clearTimeout(recovery.timer); recovery.timer = null; }
+  window.api.setDirty(d, state.convertedOnly);
   window.api.setTitle(`${d ? '● ' : ''}${t(state.name)} - PDF Studio`);
 }
 

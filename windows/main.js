@@ -145,6 +145,8 @@ function addTab(host, initial = null, { activate = true } = {}) {
   const wc = view.webContents;
   const tab = {
     win: host.win, host, view, wc, dirty: false, forceClose: false, initial, title: 'PDF Studio', empty: !initial,
+    // 開くファイルの場所は最初から持つ（読み込み中に終了・異常終了しても前回の続きから消えないように。開けなかったら外す）
+    path: docPathOk(initial?.path) ? initial.path : null,
     // 前回の続きで開くタブは、表示するまで前のページ・倍率のまま記録する
     viewState: initial?.view ? { page: initial.view.page | 0, scale: +initial.view.scale || 0, fit: initial.view.fit || null } : null,
     // 異常終了時の写しから開いたタブ：開けて新しい写しができる（または保存・閉じる）までは元の写しを残す
@@ -805,6 +807,8 @@ function openRecent(p, host = focusedHost() || lastHost) {
 
 // 前回の続き：開いていたタブ（場所のあるもの）・ページ・倍率を覚え、次の起動で戻す
 let sessionTimer = null;
+let starting = true; // 起動の途中（前回の続きを開くまで）
+const startedAt = Date.now();
 let quitting = false; // 終了の途中（閉じていくウィンドウで記録が減らないように）
 const restoreEnabled = () => getSetting('restoreSession') !== false;
 function sessionData() {
@@ -812,12 +816,16 @@ function sessionData() {
   const live = [...hosts.values()].filter((h) => !h.win.isDestroyed());
   const open = live.filter((h) => !h.windowClosing);
   if (!open.length) return null;
-  return {
-    windows: open.map((h) => {
-      const tabs = h.tabs.filter((t) => t.path);
-      return { tabs: tabs.map((t) => ({ path: t.path, ...(t.viewState || {}) })), active: Math.max(0, tabs.indexOf(h.active)) };
-    }).filter((w) => w.tabs.length)
-  };
+  const windowsData = open.map((h) => {
+    // 前回の続きで開いている途中（ウィンドウの準備前でタブがまだない）なら、開こうとしているタブを記録する
+    if (h.restoring && !h.tabs.length) return { tabs: h.restoring, active: 0 };
+    const tabs = h.tabs.filter((t) => t.path);
+    return { tabs: tabs.map((t) => ({ path: t.path, ...(t.viewState || {}) })), active: Math.max(0, tabs.indexOf(h.active)) };
+  }).filter((w) => w.tabs.length);
+  // 起動時につながらなかったファイルは、開いているタブと重ならなければ記録に残す（次の起動でまた試す）
+  const left = deferredTabs.filter((d) => !windowsData.some((w) => w.tabs.some((t) => samePath(t.path, d.path))));
+  if (left.length) windowsData.push({ tabs: left, active: 0 });
+  return { windows: windowsData };
 }
 /** 終了をやめたと決まったとき（キャンセル・保存できずにウィンドウを残した）：前回の続きの記録を再開する */
 function resumeSession() {
@@ -825,7 +833,8 @@ function resumeSession() {
   scheduleSession();
 }
 function scheduleSession() {
-  if (quitting) return;
+  // 終了の途中・起動の途中（前回の続きを開き終えるまで）は記録しない（読み込んだ前回の記録を途中の状態で上書きしないように）
+  if (quitting || starting) return;
   clearTimeout(sessionTimer);
   sessionTimer = setTimeout(saveSessionNow, 800);
 }
@@ -834,21 +843,58 @@ function saveSessionNow() {
   const data = sessionData();
   if (data) setSetting('session', data);
 }
+/** ファイル・フォルダーがあるかを、時間を区切って確かめる（'yes' | 'no' | 'timeout'） */
+let testUnreachable = null; // 自動テスト用：この場所で始まるものは「つながらない」ことにする
+function existsSoon(p, ms = 1500) {
+  if (SELFTEST && testUnreachable && p.startsWith(testUnreachable)) return new Promise((r) => setTimeout(() => r('timeout'), 50));
+  return Promise.race([
+    fs.promises.access(p).then(() => 'yes', () => 'no'),
+    new Promise((r) => setTimeout(() => r('timeout'), ms))
+  ]);
+}
+/** ドライブ・共有フォルダーの単位（C:\ や \\server\share） */
+function rootOf(p) {
+  // \\?\UNC\server\share\ の形は、共有フォルダーまでを単位にする（path.parse は \\?\UNC\ だけを返すため）
+  const long = p.match(/^\\\\\?\\UNC\\[^\\]+\\[^\\]+\\/i);
+  return long ? long[0] : path.parse(p).root;
+}
+// 前回の続きで、つながらなかった・確かめるのに時間がかかったため開かなかったタブ（記録から消さずに、次の起動でまた試す）。
+// 3 回続けて開けなければ記録から外す（なくなった共有フォルダーで毎回待たないように）
+let deferredTabs = [];
+const DEFER_MAX = 3;
 /** 前回のタブを開く。開いたら true。into を渡すと、新しいウィンドウではなくそのウィンドウのタブに開く（自動テスト用） */
-function restoreSession({ into = null } = {}) {
+async function restoreSession({ into = null } = {}) {
   const s = getSetting('session');
   const wins = Array.isArray(s?.windows) ? s.windows : [];
+  // つながらないネットワークドライブで手元のファイルの確認まで待たされないよう、先にドライブ・共有フォルダーの単位で 1 回だけ確かめる
+  const all = wins.flatMap((w) => (Array.isArray(w?.tabs) ? w.tabs : [])).filter((t) => docPathOk(t?.path));
+  const roots = [...new Set(all.map((t) => rootOf(t.path)))];
+  const rootOk = new Map(await Promise.all(roots.map(async (r) => [r, await existsSoon(r)])));
+  deferredTabs = [];
+  const checks = await Promise.all(wins.map((w) => Promise.all((Array.isArray(w?.tabs) ? w.tabs : []).map(async (t) => {
+    if (!docPathOk(t?.path)) return null;
+    const defer = () => {
+      const tries = (t.tries | 0) + 1;
+      if (tries < DEFER_MAX && !deferredTabs.some((d) => samePath(d.path, t.path))) deferredTabs.push({ ...t, tries });
+      return null;
+    };
+    // ドライブ・共有フォルダーが見つからない（つないでいない）・時間切れのときは後回し
+    const r = rootOk.get(rootOf(t.path));
+    if (r !== 'yes') return defer();
+    const f = await existsSoon(t.path);
+    if (f === 'timeout') return defer();
+    return f === 'yes' ? t : null; // ファイルだけがない（移動・削除）ときは外す
+  }))));
   let opened = 0, missing = 0;
-  for (const w of wins) {
-    const tabs = (Array.isArray(w?.tabs) ? w.tabs : []).filter((t) => {
-      const ok = docPathOk(t?.path) && fs.existsSync(t.path);
-      if (!ok) missing++;
-      return ok;
-    });
+  for (const [wi, w] of wins.entries()) {
+    const tabs = checks[wi].filter(Boolean);
+    missing += checks[wi].length - tabs.length;
     if (!tabs.length) continue;
     const init = (t) => ({ path: t.path, view: { page: t.page | 0, scale: +t.scale || 0, fit: t.fit || null } });
     const host = into || hosts.get(createWindow(init(tabs[0])).id);
+    if (!into) host.restoring = tabs.map((t) => ({ path: t.path, page: t.page | 0, scale: +t.scale || 0, fit: t.fit || null }));
     whenReady(host, () => {
+      host.restoring = null;
       // 新しいウィンドウでは 1 つ目のタブはウィンドウと一緒にできている
       const made = into ? [] : [host.tabs[0]];
       for (const t of into ? tabs : tabs.slice(1)) made.push(addTab(host, init(t), { activate: false }));
@@ -933,7 +979,7 @@ async function offerRecovery(host, answer = null) {
       try { bytes = fs.readFileSync(it.base + '.pdf'); } catch { continue; } // 読めなかった写しは残す（次の起動でまた聞く）
       // 同じファイルを前回の続きで（変更前の状態で）開いていたら、復元したものを開いてからそのタブを閉じる
       // （先に閉じると、それが最後のタブのときウィンドウごと閉じてしまう）
-      const same = it.source && [...windows.values()].find((t) => samePath(t.path, it.source) && !t.dirty);
+      const same = it.source && [...windows.values()].find((t) => samePath(t.path, it.source) && (!t.dirty || t.convertedOnly));
       // 保存するときは保存先を聞く（落ちている間に元のファイルがほかで更新されていても、黙って上書きしないように）。
       // 元の写しは、開けて新しい写しができた・保存した・閉じたときに消す
       openInHost(target, { bytes, name: it.name, path: null, source: it.source, recovered: true, recoveredFrom: it.base }, { replaceBlank: !same });
@@ -949,7 +995,11 @@ ipcMain.on('doc-source', (e, p) => {
   const tab = entryFor(e);
   if (!tab || (p != null && !docPathOk(p))) return;
   tab.path = p || null;
-  if (p) addRecent(p);
+  if (p) {
+    addRecent(p);
+    // 後回しにしていたファイルを開いたら、後回しの一覧から外す（このあと閉じたら、次の起動では開かない）
+    deferredTabs = deferredTabs.filter((d) => !samePath(d.path, p));
+  }
   scheduleSession();
 });
 ipcMain.on('doc-view', (e, v) => {
@@ -1009,14 +1059,17 @@ ipcMain.handle('get-initial', async (e) => {
     if (!SELFTEST) updater.log('INFO', `open read: ${Date.now() - t0}ms ${(bytes.length / 1048576).toFixed(1)}MB ${path.extname(init.path).toLowerCase()} uptime ${Math.round(process.uptime() * 1000)}ms`);
     return { path: init.path, name: path.basename(init.path), bytes, view: init.view || null };
   } catch (err) {
+    entry.path = null; // 開けなかったので、前回の続き・最近使ったファイルの対象から外す
+    scheduleSession();
     return { error: err.message };
   }
 });
 
-ipcMain.on('set-dirty', (e, dirty) => {
+ipcMain.on('set-dirty', (e, dirty, convertedOnly) => {
   const entry = entryFor(e);
   if (entry) {
     entry.dirty = dirty;
+    entry.convertedOnly = !!(dirty && convertedOnly); // TIFF を変換して開いただけ（編集はしていない）
     if (dirty) entry.forceClose = false; // 編集し直したら、閉じるときにまた確かめる
     else clearRecovery(entry); // 保存できた（変更がなくなった）ので、異常終了時の写しは要らない
     sendStrip(entry.host);
@@ -1290,6 +1343,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
       };
     }
     if (arg.do === 'set') { testSettings[arg.key] = arg.value; buildMenu(); return true; }
+    if (arg.do === 'unreachable') { testUnreachable = arg.prefix || null; return true; }
     if (arg.do === 'clear-recent') { clearRecent(); return recentFiles(); }
     if (arg.do === 'open-recent') return openRecent(arg.path, entry.host);
     if (arg.do === 'menu-recent') {
@@ -1300,9 +1354,10 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     if (arg.do === 'restore') {
       // 前回の続きを開き直す（新しいウィンドウに開く）。開いたタブの id を返す
       const before = new Set(windows.keys());
-      const ok = restoreSession({ into: entry.host });
+      const ok = await restoreSession({ into: arg.newWindow ? null : entry.host });
+      const immediate = sessionData(); // 読み込み前でも前回の続きに入っているか
       await new Promise((r) => setTimeout(r, 2500));
-      return { ok, tabs: [...windows.values()].filter((t) => !before.has(t.id)).map((t) => ({ id: t.id, path: t.path || null, title: tabLabel(t) })) };
+      return { ok, immediate, tabs: [...windows.values()].filter((t) => !before.has(t.id)).map((t) => ({ id: t.id, path: t.path || null, title: tabLabel(t) })) };
     }
     if (arg.do === 'fake-leftover') {
       // 前の起動が残した写しのふり（別の RUN_ID）
@@ -1506,6 +1561,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', (e, argv) => {
     const files = filesFromArgv(argv);
     if (files.length) files.forEach(openPath);
+    // 起動の途中（前回の続きを開いている）は空のウィンドウを余分に作らない。
+    // ただし、起動処理が失敗して印が残っても立ち直れるよう、10 秒たったら受け付ける
+    else if (starting && Date.now() - startedAt < 10000) return;
     else if (lastHost && !lastHost.win.isDestroyed()) {
       // もう一度起動されたら、今のウィンドウに新しいタブを開く
       const host = lastHost;
@@ -1515,7 +1573,9 @@ if (!app.requestSingleInstanceLock()) {
     } else createWindow();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // 途中で失敗しても、起動中の印が残らないようにする（残ると前回の続きの記録が止まったままになる）
+    try {
     protocol.handle('app', (req) => {
       const { pathname } = new URL(req.url);
       const p = path.normalize(path.join(ROOT, decodeURIComponent(pathname)));
@@ -1538,7 +1598,15 @@ if (!app.requestSingleInstanceLock()) {
     if (!SELFTEST) updater.log('INFO', `ready: uptime ${Math.round(process.uptime() * 1000)}ms`);
     // ファイルを指定して起動したときはそのファイルだけを開く。指定がなければ前回の続き（設定で切れる）
     if (files.length) files.forEach(openPath);
-    else if (SELFTEST || !restoreEnabled() || !restoreSession()) createWindow();
+    else if (SELFTEST || !restoreEnabled()) createWindow();
+    else {
+      // 前回の続き。開けなかった（失敗・開けるファイルがない）ときは空のウィンドウ
+      let ok = false;
+      try { ok = await restoreSession(); } catch (e) { updater.log('ERROR', e); }
+      try { if (!ok && !hosts.size) createWindow(); } catch (e) { updater.log('ERROR', e); }
+    }
+    starting = false;
+    scheduleSession(); // 起動中は止めていた前回の続きの記録を、開き終えた状態で書く
     // 前回正しく終了しなかったときの写しがあれば、復元するかを聞く
     if (!SELFTEST) { const h = lastHost; if (h) whenReady(h, () => setTimeout(() => offerRecovery(lastHost).catch((e) => updater.log('ERROR', e)), 1500)); }
     if (SELFTEST) BrowserWindow.getAllWindows()[0]?.setSize(1400, 900 + STRIP_H);
@@ -1561,6 +1629,9 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+    } finally {
+      if (starting) { starting = false; scheduleSession(); }
+    }
   });
 
   app.on('window-all-closed', () => app.quit());

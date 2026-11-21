@@ -223,6 +223,8 @@ async function init() {
   if (init?.error) toast(`開けませんでした: ${init.error}`, 5000);
   else if (init?.bytes) {
     await F.openHere(new Uint8Array(init.bytes), init.path, init.name);
+    // 開けなかった（パスワードのキャンセル・壊れたファイル）ときは、前回の続き・最近使ったファイルの対象から外す
+    if (!hasDoc()) window.api.docSource(null);
     if (init.recovered) {
       // 異常終了時の写しから復元した文書：保存していない状態で開き、元のファイルを知らせる（保存するときは保存先を聞く）
       if (hasDoc()) {
@@ -231,7 +233,7 @@ async function init() {
         window.api.recoveryOpened();
         toast('前回保存していなかった文書を復元しました。内容を確かめてから保存してください。', 6000);
       }
-    } else if (!init.path && hasDoc()) setDirty(true);
+    } else if (!init.path && hasDoc() && !state.convertedOnly) setDirty(true); // TIFF を変換しただけのときは印をそのままにする
     if (init.view && hasDoc()) {
       restoringView = true;
       try { await restoreView(init.view); } finally { restoringView = false; }
