@@ -166,7 +166,7 @@ enum PageSize {
             if let go = o.action as? PDFActionGoTo, let nd = fix(go.destination) { o.action = PDFActionGoTo(destination: nd) }
             for k in 0..<o.numberOfChildren { if let c = o.child(at: k) { walk(c) } }
         }
-        if let root = doc.outlineRoot { walk(root) }
+        if let root = doc.outlineRoot { walk(root); Compositor.markOutlineEdited(doc) }
         withExtendedLifetime(originals) {}
         return result
     }

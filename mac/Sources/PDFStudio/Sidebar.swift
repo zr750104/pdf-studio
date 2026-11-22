@@ -373,6 +373,7 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         let row = outlineView.row(for: tf)
         guard row >= 0, let o = outlineView.item(atRow: row) as? PDFOutline, o.label != tf.stringValue, let doc = studio else { return }
         OutlineEdit.rename(o, to: tf.stringValue, in: doc)
+        warnFormLoss()
     }
 
     private func newBookmark() -> PDFOutline? {
@@ -392,6 +393,7 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         OutlineEdit.insert(o, into: root, at: root.numberOfChildren, in: studio)
         reload()
         select(o)
+        warnFormLoss()
     }
 
     @objc private func addChildBookmark() {
@@ -400,6 +402,15 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         OutlineEdit.insert(o, into: parent, at: parent.numberOfChildren, in: studio)
         reload()
         select(o)
+        warnFormLoss()
+    }
+
+    /// フォームやページラベルのある文書では、しおりを変えて保存するとそれらが失われることを 1 度だけ知らせる
+    private var warnedFormLoss = false
+    private func warnFormLoss() {
+        guard !warnedFormLoss, let doc = studio?.pdf, Compositor.hasFormOrPageLabels(doc) else { return }
+        warnedFormLoss = true
+        Dialog.alert("フォーム・ページラベルについて", "この PDF にはフォームの欄またはページラベル（i, ii などのページ番号の表記）があります。しおりを変えて保存すると、ほかのアプリでのフォームの入力やページラベルが使えなくなることがあります。気になる場合は、別名で保存してください。")
     }
 
     private var selected: PDFOutline? { outlineView.item(atRow: outlineView.selectedRow) as? PDFOutline }
@@ -413,12 +424,13 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         guard let o = selected, let studio else { return }
         OutlineEdit.remove(o, in: studio)
         reload()
+        warnFormLoss()
     }
 
     /// 並べ替え・段の上げ下げ。動かしたしおりを選んだままにする（続けて動かせるように）
     private func relocate(_ op: (PDFOutline, PDFStudioDocument) -> Bool) {
         guard let o = selected, let studio else { NSSound.beep(); return }
-        if op(o, studio) { reload(); select(o) } else { NSSound.beep() }
+        if op(o, studio) { reload(); select(o); warnFormLoss() } else { NSSound.beep() }
     }
     @objc private func moveUp() { relocate { OutlineEdit.move($0, by: -1, in: $1) } }
     @objc private func moveDown() { relocate { OutlineEdit.move($0, by: 1, in: $1) } }

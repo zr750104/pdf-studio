@@ -314,8 +314,11 @@ enum SelfTest {
             root.insertChild(o, at: i)
             marks.append(o)
         }
-        let (a, b, c) = (marks[0], marks[1], marks[2])
-        let d = PDFStudioDocument.makeNew(doc, title: "outline.pdf", edited: false)
+        _ = marks
+        // ファイルから開いたときと同じく、書き出して読み込んだ文書で試す（PDFKit は読み込んだ文書のしおりの変更を保存に反映しない）
+        guard let loaded = doc.dataRepresentation().flatMap(PDFDocument.init(data:)), let lr = loaded.outlineRoot, lr.numberOfChildren == 3,
+              let a = lr.child(at: 0), let b = lr.child(at: 1), let c = lr.child(at: 2) else { check(false, "しおり：読み込んだ文書の準備"); return }
+        let d = PDFStudioDocument.makeNew(loaded, title: "outline.pdf", edited: false)
         guard let um = d.undoManager else { check(false, "しおり：取り消しの準備"); return }
         um.groupsByEvent = false
         func step(_ body: () -> Void) { um.beginUndoGrouping(); body(); um.endUndoGrouping() }
@@ -359,13 +362,18 @@ enum SelfTest {
         um.undo()   // しおりの「1 段上げる」を取り消す
         let afterReplace = shape() == "A(C),B"
         // 削除 → ページの操作 → 取り消し 2 回：戻ったしおりは今の文書のページを指す
-        step { OutlineEdit.remove(c, in: d) }
+        // 文書が入れ替わったので、今の文書のしおり（A の子の C）を使う（画面も今の文書のしおりを渡す）
+        var trace = [shape()]
+        if let cNow = d.pdf.outlineRoot?.child(at: 0)?.child(at: 0) { step { OutlineEdit.remove(cNow, in: d) } }
+        trace.append(shape())
         step { d.performStructuralChange("ページの回転") { pdf in pdf.page(at: 0)?.rotation = 180 } }
-        um.undo(); um.undo()
+        trace.append(shape())
+        um.undo(); trace.append(shape())
+        um.undo(); trace.append(shape())
         let back = d.pdf.outlineRoot?.child(at: 0)?.child(at: 0)
         let backPage = back?.destination?.page.map { d.pdf.index(for: $0) }
         let restoredOk = shape() == "A(C),B" && backPage == 2
-        check(replaced && afterReplace && restoredOk, "しおり：ページの操作を取り消したあとも、しおりの取り消しが効く（削除したしおりは今の文書のページを指す \(String(describing: backPage))） (\(beforeStruct) → \(shape()))")
+        check(replaced && afterReplace && restoredOk, "しおり：ページの操作を取り消したあとも、しおりの取り消しが効く（削除したしおりは今の文書のページを指す \(String(describing: backPage))） (\(beforeStruct) → \(trace.joined(separator: " → ")))")
         check(ok && edited && topCantMove && undone && redone && savedShape == "C/B2" && destOk,
               "しおり：並べ替え・段の上げ下げ・名前の変更・削除を元に戻せ、保存しても形が残る (\(log.joined(separator: " → ")), やり直し \(shape()), 保存後 \(savedShape), 移動先 \(destOk))")
     }

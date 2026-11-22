@@ -31,6 +31,7 @@ enum OutlineEdit {
     }
 
     private static func register(_ doc: PDFStudioDocument, _ name: String, _ undo: @escaping (PDFStudioDocument) -> Void) {
+        Compositor.markOutlineEdited(doc.pdf)
         guard let um = doc.undoManager else { doc.updateChangeCount(.changeDone); return }
         um.registerUndo(withTarget: doc) { d in
             undo(d)
@@ -135,7 +136,7 @@ enum OutlineEdit {
     /// 名前を変える（取り消すと元の名前に戻る）
     static func rename(_ o: PDFOutline, to label: String, in doc: PDFStudioDocument) {
         let old = o.label ?? ""
-        guard old != label, let now = path(of: o) else { o.label = label; return }
+        guard old != label, let now = path(of: o) else { o.label = label; Compositor.markOutlineEdited(doc.pdf); return }
         o.label = label
         register(doc, "しおりの名前を変更") { d in if let x = resolve(now, in: d) { rename(x, to: old, in: d) } }
     }

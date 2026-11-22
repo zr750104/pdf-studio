@@ -42,12 +42,20 @@ enum Compositor {
         return newPage
     }
 
+    /// しおりを変えた印。PDFKit は、読み込んだ文書のしおりを変えても保存に反映しない（元のしおりのまま書き出す）ので、
+    /// 印のある文書はページを複製した新しい文書にしおりを作り直して保存する
+    private static var outlineEditedKey = 0
+    static func markOutlineEdited(_ doc: PDFDocument) {
+        objc_setAssociatedObject(doc, &outlineEditedKey, true, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+    static func outlineEdited(_ doc: PDFDocument) -> Bool { (objc_getAssociatedObject(doc, &outlineEditedKey) as? Bool) ?? false }
+
     /// ページを差し替え、しおりのリンク先も新しいページへ付け替える
     static func replacePage(in doc: PDFDocument, at index: Int, with newPage: PDFPage) {
         guard let old = doc.page(at: index) else { return }
         doc.removePage(at: index)
         doc.insert(newPage, at: index)
-        if let root = doc.outlineRoot { remap(root, from: old, to: newPage) }
+        if let root = doc.outlineRoot { remap(root, from: old, to: newPage); markOutlineEdited(doc) }
     }
 
     private static func remap(_ outline: PDFOutline, from old: PDFPage, to new: PDFPage) {
@@ -94,16 +102,19 @@ enum Compositor {
             target = out
         }
         let hasImageStamps = (0..<target.pageCount).contains { i in target.page(at: i)?.annotations.contains(where: ImageStamp.isImageStamp) ?? false }
-        if hasImageStamps {
+        let edited = outlineEdited(doc)
+        if hasImageStamps || edited {
             let out = PDFDocument()
             var map: [ObjectIdentifier: PDFPage] = [:]
             for i in 0..<target.pageCount {
                 guard let p = target.page(at: i), let c = p.copy() as? PDFPage else { continue }
                 out.insert(c, at: out.pageCount)
                 map[ObjectIdentifier(p)] = c
+                // しおりは元の文書（編集したもの）から写すので、元の文書のページも同じページに対応させる
+                if let dp = doc.page(at: i) { map[ObjectIdentifier(dp)] = c }
             }
             out.documentAttributes = target.documentAttributes
-            if let root = target.outlineRoot { out.outlineRoot = copyOutline(root, map) }
+            if let root = edited ? doc.outlineRoot : target.outlineRoot { out.outlineRoot = copyOutline(root, map) }
             target = out
         }
         return write(target, options: options)
