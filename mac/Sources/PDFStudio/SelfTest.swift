@@ -358,7 +358,14 @@ enum SelfTest {
         let replaced = shape() == beforeStruct
         um.undo()   // しおりの「1 段上げる」を取り消す
         let afterReplace = shape() == "A(C),B"
-        check(replaced && afterReplace, "しおり：ページの操作を取り消したあとも、しおりの取り消しが効く (\(beforeStruct) → \(shape()))")
+        // 削除 → ページの操作 → 取り消し 2 回：戻ったしおりは今の文書のページを指す
+        step { OutlineEdit.remove(c, in: d) }
+        step { d.performStructuralChange("ページの回転") { pdf in pdf.page(at: 0)?.rotation = 180 } }
+        um.undo(); um.undo()
+        let back = d.pdf.outlineRoot?.child(at: 0)?.child(at: 0)
+        let backPage = back?.destination?.page.map { d.pdf.index(for: $0) }
+        let restoredOk = shape() == "A(C),B" && backPage == 2
+        check(replaced && afterReplace && restoredOk, "しおり：ページの操作を取り消したあとも、しおりの取り消しが効く（削除したしおりは今の文書のページを指す \(String(describing: backPage))） (\(beforeStruct) → \(shape()))")
         check(ok && edited && topCantMove && undone && redone && savedShape == "C/B2" && destOk,
               "しおり：並べ替え・段の上げ下げ・名前の変更・削除を元に戻せ、保存しても形が残る (\(log.joined(separator: " → ")), やり直し \(shape()), 保存後 \(savedShape), 移動先 \(destOk))")
     }

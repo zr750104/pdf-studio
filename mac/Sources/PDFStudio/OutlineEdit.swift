@@ -91,11 +91,45 @@ enum OutlineEdit {
         register(doc, "しおりを追加") { d in if let x = resolve(now, in: d) { remove(x, in: d) } }
     }
 
-    /// 削除する（取り消すと元の場所に戻る）
+    /// しおりの中身を値として控えたもの（移動先はページの番号で持つ。文書が入れ替わっても作り直せる）
+    struct Snapshot {
+        let label: String?
+        let page: Int?
+        let point: CGPoint
+        let zoom: CGFloat
+        let isOpen: Bool
+        let children: [Snapshot]
+
+        init(_ o: PDFOutline, in doc: PDFDocument) {
+            label = o.label
+            let dest = o.destination ?? (o.action as? PDFActionGoTo)?.destination
+            if let pg = dest?.page { let i = doc.index(for: pg); page = i == NSNotFound ? nil : i } else { page = nil }
+            point = dest?.point ?? .zero
+            zoom = dest?.zoom ?? kPDFDestinationUnspecifiedValue
+            isOpen = o.isOpen
+            children = (0..<o.numberOfChildren).compactMap { o.child(at: $0).map { Snapshot($0, in: doc) } }
+        }
+
+        func make(in doc: PDFDocument) -> PDFOutline {
+            let o = PDFOutline()
+            o.label = label
+            if let page, let pg = doc.page(at: page) {
+                let d = PDFDestination(page: pg, at: point)
+                d.zoom = zoom
+                o.destination = d
+            }
+            for (i, c) in children.enumerated() { o.insertChild(c.make(in: doc), at: i) }
+            o.isOpen = isOpen
+            return o
+        }
+    }
+
+    /// 削除する（取り消すと元の場所に戻る。そのときの文書のページで作り直す）
     static func remove(_ o: PDFOutline, in doc: PDFStudioDocument) {
         guard let p = place(of: o), let parentPath = path(of: p.parent) else { return }
+        let snap = Snapshot(o, in: doc.pdf)
         o.removeFromParent()
-        register(doc, "しおりを削除") { d in if let parent = resolve(parentPath, in: d) { insert(o, into: parent, at: p.index, in: d) } }
+        register(doc, "しおりを削除") { d in if let parent = resolve(parentPath, in: d) { insert(snap.make(in: d.pdf), into: parent, at: p.index, in: d) } }
     }
 
     /// 名前を変える（取り消すと元の名前に戻る）
