@@ -174,6 +174,7 @@ enum SelfTest {
         dropTests(outDir: outDir)
         outlineTests()
         overlayTests(outDir: outDir)
+        pageSizeTests(outDir: outDir)
         updateTests()
         uiTextTests(doc: doc, outDir: outDir)
         interactionTests(doc: doc)
@@ -394,6 +395,121 @@ enum SelfTest {
             try? NSBitmapImageRep(data: png)?.representation(using: .png, properties: [:])?.write(to: outDir.appendingPathComponent("overlay-result.png"))
         }
         check(Overlay.compare(old, new, progress: { _, _ in }, cancelled: { true }) == nil, "重ねて比較：中止できる")
+    }
+
+    /// ページの大きさをそろえる：注釈の全種類・リンク・しおり・回転・切り抜きのずれ。そろえる → 保存 → 開き直して位置を比べる
+    static func pageSizeTests(outDir: URL) {
+        let letter = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let data = NSMutableData()
+        var box = letter
+        guard let consumer = CGDataConsumer(data: data as CFMutableData), let ctx = CGContext(consumer: consumer, mediaBox: &box, nil) else { check(false, "大きさ：準備"); return }
+        for _ in 0..<3 {
+            ctx.beginPDFPage(nil)
+            ctx.setFillColor(gray: 0, alpha: 1)
+            ctx.fill(CGRect(x: 100, y: 100, width: 50, height: 50))   // 位置を確かめる黒い四角
+            ctx.endPDFPage()
+        }
+        ctx.closePDF()
+        guard let doc = PDFDocument(data: data as Data), doc.pageCount == 3, let p0 = doc.page(at: 0), let p1 = doc.page(at: 1), let p2 = doc.page(at: 2) else { check(false, "大きさ：準備"); return }
+        p1.rotation = 90
+        p2.setBounds(CGRect(x: 20, y: 30, width: 560, height: 700), for: .cropBox)
+        func border(_ w: CGFloat) -> PDFBorder { let b = PDFBorder(); b.lineWidth = w; return b }
+        let sq = PDFAnnotation(bounds: CGRect(x: 300, y: 600, width: 100, height: 50), forType: .square, withProperties: nil)
+        sq.color = .red; sq.border = border(3); p0.addAnnotation(sq)
+        let line = PDFAnnotation(bounds: CGRect(x: 200, y: 300, width: 200, height: 120), forType: .line, withProperties: nil)
+        line.startPoint = CGPoint(x: 10, y: 10); line.endPoint = CGPoint(x: 190, y: 110); line.color = .blue; line.border = border(2); p0.addAnnotation(line)
+        let ft = PDFAnnotation(bounds: CGRect(x: 60, y: 520, width: 300, height: 40), forType: .freeText, withProperties: nil)
+        ft.contents = "テキストボックス"; ft.font = NSFont(name: "HiraginoSans-W3", size: 18); ft.color = .clear; ft.border = border(0); p0.addAnnotation(ft)
+        let ink = PDFAnnotation(bounds: CGRect(x: 380, y: 450, width: 150, height: 100), forType: .ink, withProperties: nil)
+        let path = NSBezierPath(); path.move(to: CGPoint(x: 5, y: 5)); path.line(to: CGPoint(x: 145, y: 95)); ink.add(path); ink.color = .purple; ink.border = border(4); p0.addAnnotation(ink)
+        let hl = PDFAnnotation(bounds: CGRect(x: 100, y: 250, width: 120, height: 14), forType: .highlight, withProperties: nil)
+        hl.quadrilateralPoints = [NSValue(point: NSPoint(x: 0, y: 14)), NSValue(point: NSPoint(x: 120, y: 14)), NSValue(point: .zero), NSValue(point: NSPoint(x: 120, y: 0))]
+        hl.color = NSColor.systemYellow.withAlphaComponent(0.5); p0.addAnnotation(hl)
+        let stampRect = CGRect(x: 420, y: 150, width: 120, height: 60)
+        if let img = StampRenderer.make(.approved), let st = ImageStamp.make(image: img, bounds: stampRect) { p0.addAnnotation(st) }
+        let scale100 = MeasureScale(factor: MeasureScale.factor(ratio: 100, unit: "mm"), unit: "mm", label: "1:100", ratio: 100, decimals: 1)
+        let m = Measure.make(kind: "distance", points: [CGPoint(x: 100, y: 700), CGPoint(x: 400, y: 700)], scale: scale100, color: .red, lineWidth: 1)
+        p0.addAnnotation(m.shape); p0.addAnnotation(m.label)
+        let labelBefore = m.label.contents ?? ""
+        let link = PDFAnnotation(bounds: CGRect(x: 50, y: 50, width: 100, height: 20), forType: .link, withProperties: nil)
+        link.destination = PDFDestination(page: p2, at: CGPoint(x: 100, y: 500)); p0.addAnnotation(link)
+        let root = PDFOutline(); doc.outlineRoot = root
+        let ol = PDFOutline(); ol.label = "3 ページ"; ol.destination = PDFDestination(page: p2, at: CGPoint(x: 120, y: 600)); root.insertChild(ol, at: 0)
+
+        let a4 = PageSize.papers[1].size
+        guard let t0 = PageSize.plan(p0, paper: a4, onlyShrink: false), let t2 = PageSize.plan(p2, paper: a4, onlyShrink: false) else { check(false, "大きさ：計画"); return }
+        let s = t0.scale
+        let r = PageSize.normalize(doc, pages: [0, 1, 2], paper: a4, onlyShrink: false)
+        func near(_ a: CGFloat, _ b: CGFloat, _ tol: CGFloat = 1.5) -> Bool { abs(a - b) <= tol }
+        func nearRect(_ a: CGRect, _ b: CGRect) -> Bool { near(a.minX, b.minX) && near(a.minY, b.minY) && near(a.width, b.width) && near(a.height, b.height) }
+        func nearPt(_ a: CGPoint, _ b: CGPoint) -> Bool { near(a.x, b.x) && near(a.y, b.y) }
+        /// 黒い四角の中心が暗いか（回転なしのページ）
+        func dark(_ page: PDFPage, at p: CGPoint) -> Bool {
+            let size = page.bounds(for: .mediaBox).size
+            guard let c = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: Int(size.width),
+                                    space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            c.setFillColor(gray: 1, alpha: 1); c.fill(CGRect(origin: .zero, size: size))
+            page.draw(with: .mediaBox, to: c)
+            guard let d = c.data?.bindMemory(to: UInt8.self, capacity: Int(size.width) * Int(size.height)) else { return false }
+            let x = Int(p.x), y = Int(size.height) - 1 - Int(p.y)
+            return d[y * Int(size.width) + x] < 128
+        }
+        // 保存して開き直す
+        let saved = Compositor.serialize(doc).flatMap(PDFDocument.init(data:))
+        for (label, d) in [("そろえた直後", doc), ("保存して開き直したあと", saved)] {
+            guard let d, d.pageCount == 3, let q0 = d.page(at: 0), let q1 = d.page(at: 1), let q2 = d.page(at: 2) else { check(false, "大きさ：\(label)の文書"); continue }
+            var bad: [String] = []
+            let m0 = q0.bounds(for: .mediaBox).size, m1 = q1.bounds(for: .mediaBox).size, m2 = q2.bounds(for: .cropBox)
+            if !(near(m0.width, a4.width, 0.5) && near(m0.height, a4.height, 0.5)) { bad.append("1 ページの大きさ \(m0)") }
+            if !(q1.rotation == 90 && near(m1.width, a4.width, 0.5) && near(m1.height, a4.height, 0.5)) { bad.append("回転したページ \(q1.rotation) \(m1)") }
+            if !(near(m2.width, a4.width, 0.5) && near(m2.height, a4.height, 0.5)) { bad.append("切り抜きのずれたページ \(m2)") }
+            if !dark(q0, at: CGPoint(x: 125, y: 125).applying(t0.transform)) { bad.append("内容の位置") }
+            if !dark(q2, at: CGPoint(x: 125, y: 125).applying(t2.transform)) { bad.append("切り抜きのずれたページの内容の位置") }
+            let ann = q0.annotations
+            if let a = ann.first(where: { $0.type == "Square" }) { if !nearRect(a.bounds, CGRect(x: 300, y: 600, width: 100, height: 50).applying(t0.transform)) { bad.append("四角 \(a.bounds)") } } else { bad.append("四角がない") }
+            if let a = ann.first(where: { $0.type == "Line" && Measure.data(of: $0) == nil }) {
+                let st = CGPoint(x: a.bounds.minX + a.startPoint.x, y: a.bounds.minY + a.startPoint.y), en = CGPoint(x: a.bounds.minX + a.endPoint.x, y: a.bounds.minY + a.endPoint.y)
+                if !(nearPt(st, CGPoint(x: 210, y: 310).applying(t0.transform)) && nearPt(en, CGPoint(x: 390, y: 410).applying(t0.transform))) { bad.append("線の端 \(st) \(en)") }
+            } else { bad.append("線がない") }
+            if let a = ann.first(where: { $0.type == "FreeText" && ($0.contents ?? "").contains("テキストボックス") }) {
+                if !near(a.font?.pointSize ?? 0, 18 * s, 0.6) || !nearPt(a.bounds.origin, CGPoint(x: 60, y: 520).applying(t0.transform)) { bad.append("テキスト \(a.font?.pointSize ?? 0) \(a.bounds)") }
+            } else { bad.append("テキストがない") }
+            if let a = ann.first(where: { $0.type == "Ink" && Measure.data(of: $0) == nil }) {
+                let pb = (a.paths ?? []).reduce(CGRect.null) { $0.union($1.bounds) }.offsetBy(dx: a.bounds.minX, dy: a.bounds.minY)
+                if !nearRect(pb, CGRect(x: 385, y: 455, width: 140, height: 90).applying(t0.transform)) { bad.append("手書き \(pb)") }
+            } else { bad.append("手書きがない") }
+            if let a = ann.first(where: { $0.type == "Highlight" }) {
+                let qs = (a.quadrilateralPoints ?? []).map { CGPoint(x: a.bounds.minX + $0.pointValue.x, y: a.bounds.minY + $0.pointValue.y) }
+                if !(qs.count == 4 && nearPt(qs[1], CGPoint(x: 220, y: 264).applying(t0.transform)) && nearPt(qs[2], CGPoint(x: 100, y: 250).applying(t0.transform))) { bad.append("ハイライト \(qs)") }
+            } else { bad.append("ハイライトがない") }
+            // 測った長さ（実寸）は変わらない
+            if let lab = ann.first(where: { $0.type == "FreeText" && Measure.group(of: $0) != nil }) {
+                if (lab.contents ?? "") != labelBefore { bad.append("測定 \(lab.contents ?? "") ≠ \(labelBefore)") }
+            } else { bad.append("測定がない") }
+            // 画像スタンプ：直後は注釈、保存後は内容に焼き込まれる。どちらも新しい位置に見える
+            let stampCenter = CGPoint(x: stampRect.midX, y: stampRect.minY + 8).applying(t0.transform)
+            if d === doc {
+                if let st = ann.first(where: { ImageStamp.isImageStamp($0) }) { if !nearRect(st.bounds, stampRect.applying(t0.transform)) { bad.append("スタンプ \(st.bounds)") } } else { bad.append("スタンプがない") }
+            } else if !dark(q0, at: stampCenter) && !(q0.annotations.contains { ImageStamp.isImageStamp($0) }) { bad.append("保存後のスタンプ") }
+            if let lk = ann.first(where: { $0.type == "Link" }), let dest = lk.destination ?? (lk.action as? PDFActionGoTo)?.destination, let dp = dest.page {
+                if !(d.index(for: dp) == 2 && nearPt(dest.point, CGPoint(x: 100, y: 500).applying(t2.transform))) { bad.append("リンク先 \(d.index(for: dp)) \(dest.point)") }
+            } else { bad.append("リンクがない") }
+            if let od = d.outlineRoot?.child(at: 0)?.destination, let op = od.page {
+                if !(d.index(for: op) == 2 && nearPt(od.point, CGPoint(x: 120, y: 600).applying(t2.transform))) { bad.append("しおり \(d.index(for: op)) \(od.point)") }
+            } else { bad.append("しおりがない") }
+            check(r.changed == 3 && bad.isEmpty, "ページの大きさをそろえる（\(label)）：内容・注釈・リンク・しおりが同じだけ動く (\(bad.isEmpty ? "ずれなし" : bad.joined(separator: "、")))")
+        }
+        if let png = saved?.page(at: 0)?.thumbnail(of: NSSize(width: 600, height: 850), for: .mediaBox).tiffRepresentation {
+            try? NSBitmapImageRep(data: png)?.representation(using: .png, properties: [:])?.write(to: outDir.appendingPathComponent("pagesize-result.png"))
+        }
+        // 大きいページだけ縮める：A4 のページを A3 にしても拡大しない（用紙だけ大きくなり、内容は同じ大きさで中央）
+        if let small = Operations.blankPage(size: PageSize.papers[1].size), let plan = PageSize.plan(small, paper: PageSize.papers[0].size, onlyShrink: true) {
+            check(plan.scale == 1, "ページの大きさをそろえる：「大きいページだけ縮める」では拡大しない (倍率 \(plan.scale))")
+        } else { check(false, "ページの大きさをそろえる：「大きいページだけ縮める」") }
+        // すでに同じ大きさなら変えない
+        if let same = Operations.blankPage(size: PageSize.papers[1].size) {
+            check(PageSize.plan(same, paper: PageSize.papers[1].size, onlyShrink: false) == nil, "ページの大きさをそろえる：すでに同じ大きさのページは変えない")
+        }
     }
 
     /// 実際のマウス・キーのイベントで操作する（テンキーの拡大・縮小、手のひらの慣性スクロール）

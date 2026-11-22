@@ -311,6 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item("空白ページを挿入", #selector(W.insertBlankPage(_:)), "n", [.command, .option]),
             item("ファイルからページを挿入…", #selector(W.insertFromFile(_:)), "i", [.command, .shift]),
             item("ページを複製", #selector(W.duplicatePages(_:)), "d"),
+            item("ページの大きさをそろえる…", #selector(W.normalizePageSize(_:))),
             item("ページを抽出…", #selector(W.extractPages(_:)), "e", [.command, .option]),
             item("文書を分割…", #selector(W.splitDocument(_:))),
             sep(),

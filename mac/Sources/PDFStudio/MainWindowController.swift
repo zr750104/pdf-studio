@@ -417,6 +417,44 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
+    /// ページの大きさを用紙にそろえる（すべてのページ。縦横の向きはページごとに元のまま）
+    @objc func normalizePageSize(_ sender: Any?) {
+        guard studio.pdf.allowsDocumentChanges else { Dialog.alert("この文書は変更できません", L("文書の作成者が変更を許可していません。"), style: .warning); return }
+        let alert = NSAlert()
+        alert.messageText = "ページの大きさをそろえる"
+        alert.informativeText = "縦横の向きはページごとに元のまま、縦横比を保って中央に収めます。注釈やリンクも一緒に動かします。"
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        popup.addItems(withTitles: PageSize.papers.map(\.name))
+        popup.selectItem(at: 1)
+        let shrink = NSButton(checkboxWithTitle: "大きいページだけ縮める（小さいページは拡大しない）", target: nil, action: nil)
+        let label = NSTextField(labelWithString: "用紙")
+        let row = NSStackView(views: [label, popup])
+        let stack = NSStackView(views: [row, shrink])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.frame = NSRect(x: 0, y: 0, width: 380, height: 56)
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "そろえる")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let paper = PageSize.papers[max(0, popup.indexOfSelectedItem)]
+        let onlyShrink = shrink.state == .on
+        // 変わるページがなければ、取り消しの記録を残さずに知らせる
+        guard (0..<studio.pdf.pageCount).contains(where: { i in studio.pdf.page(at: i).map { PageSize.plan($0, paper: paper.size, onlyShrink: onlyShrink) != nil } ?? false }) else {
+            Dialog.alert("大きさを変えるページはありませんでした")
+            return
+        }
+        let hadMeasure = (0..<studio.pdf.pageCount).contains { i in studio.pdf.page(at: i)?.annotations.contains { Measure.data(of: $0) != nil } ?? false }
+        var result = PageSize.Result()
+        studio.performStructuralChange("ページの大きさをそろえる") { pdf in
+            result = PageSize.normalize(pdf, pages: Array(0..<pdf.pageCount), paper: paper.size, onlyShrink: onlyShrink)
+        }
+        var notes = [L("{n} ページの大きさを {s} にそろえました").replacingOccurrences(of: "{n}", with: "\(result.changed)").replacingOccurrences(of: "{s}", with: paper.name)]
+        if hadMeasure { notes.append(L("これまでの測定の注釈は実寸のまま直しました。これから測るときは、大きさを変えたページで縮尺を合わせ直してください。")) }
+        if result.forms { notes.append(L("フォームの入力欄の位置は動かしましたが、文字の大きさは変えていません。")) }
+        Dialog.alert("ページの大きさをそろえました", notes.joined(separator: "\n\n"))
+    }
+
     @objc func insertBlankPage(_ sender: Any?) {
         let after = targetPages.max() ?? (studio.pdf.pageCount - 1)
         let size = studio.pdf.page(at: max(0, after)).map { $0.bounds(for: .mediaBox).size } ?? Operations.a4

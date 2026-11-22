@@ -2,70 +2,70 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>PDFStudio</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.local.pdfstudio</string>
-    <key>CFBundleName</key>
-    <string>PDF Studio</string>
-    <key>CFBundleDisplayName</key>
-    <string>PDF Studio</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
-    <key>CFBundleVersion</key>
-    <string>200</string>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>en</string>
-        <string>ja</string>
-        <string>th</string>
-    </array>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.productivity</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>PDF Studio for Mac</string>
-    <key>CFBundleDocumentTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeName</key>
-            <string>PDF 書類</string>
-            <key>LSItemContentTypes</key>
-            <array>
-                <string>com.adobe.pdf</string>
-            </array>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
-            <key>LSHandlerRank</key>
-            <string>Alternate</string>
-            <key>NSDocumentClass</key>
-            <string>PDFStudioDocument</string>
-        </dict>
-        <dict>
-            <key>CFBundleTypeName</key>
-            <string>TIFF Image</string>
-            <key>LSItemContentTypes</key>
-            <array>
-                <string>public.tiff</string>
-            </array>
-            <key>CFBundleTypeRole</key>
-            <string>Viewer</string>
-            <key>LSHandlerRank</key>
-            <string>Alternate</string>
-            <key>NSDocumentClass</key>
-            <string>PDFStudioDocument</string>
-        </dict>
-    </array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>PDF Studio</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>PDF 書類</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.adobe.pdf</string>
+			</array>
+			<key>NSDocumentClass</key>
+			<string>PDFStudioDocument</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>TIFF Image</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.tiff</string>
+			</array>
+			<key>NSDocumentClass</key>
+			<string>PDFStudioDocument</string>
+		</dict>
+	</array>
+	<key>CFBundleExecutable</key>
+	<string>PDFStudio</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.pdfstudio</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>ja</string>
+		<string>th</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>PDF Studio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>210</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>PDF Studio for Mac</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>

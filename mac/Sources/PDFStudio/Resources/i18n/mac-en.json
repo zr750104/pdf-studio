@@ -255,7 +255,20 @@
   "重ねて比較する（新しい版の）ファイルを選んでください": "Choose the (newer) file to overlay-compare",
   "重ねて比較できませんでした": "Could not overlay and compare",
   "重ねて比較（図面）…": "Overlay Compare (Drawings)…",
-  "青：新しい版だけにある線": "Blue: lines only in the new version"
+  "青：新しい版だけにある線": "Blue: lines only in the new version",
+  "{n} ページの大きさを {s} にそろえました": "Resized {n} pages to {s}",
+  "この文書は変更できません": "This document cannot be changed",
+  "これまでの測定の注釈は実寸のまま直しました。これから測るときは、大きさを変えたページで縮尺を合わせ直してください。": "Existing measurement annotations keep their real-world lengths. Recalibrate the scale on resized pages before measuring again.",
+  "そろえる": "Apply",
+  "フォームの入力欄の位置は動かしましたが、文字の大きさは変えていません。": "Form fields were moved, but their text size was not changed.",
+  "ページの大きさをそろえました": "Page size normalized",
+  "ページの大きさをそろえる": "Normalize Page Size",
+  "ページの大きさをそろえる…": "Normalize Page Size…",
+  "大きいページだけ縮める（小さいページは拡大しない）": "Only shrink larger pages (do not enlarge smaller ones)",
+  "大きさを変えるページはありませんでした": "No pages needed resizing",
+  "文書の作成者が変更を許可していません。": "The author of this document does not allow changes.",
+  "用紙": "Paper",
+  "縦横の向きはページごとに元のまま、縦横比を保って中央に収めます。注釈やリンクも一緒に動かします。": "Each page keeps its orientation and is scaled to fit and centered, keeping its aspect ratio. Annotations and links move with it."
  },
  "patterns": [
   [
