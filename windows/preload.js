@@ -1,8 +1,10 @@
 // レンダラーに公開する API（Node.js の機能はここ経由でのみ使う）
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   getInitial: () => ipcRenderer.invoke('get-initial'),
+  // ドロップしたファイルの場所（分からないときは null）。TIFF の元のファイルを知るためだけに使う
+  pathForFile: (f) => { try { return webUtils.getPathForFile(f) || null; } catch { return null; } },
   setDirty: (d, convertedOnly = false) => ipcRenderer.send('set-dirty', d, convertedOnly),
   setTitle: (t) => ipcRenderer.send('set-title', t),
   closeWindow: () => ipcRenderer.send('close-window'),

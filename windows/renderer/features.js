@@ -51,7 +51,9 @@ export async function openHere(bytes, path, name) {
   try {
     const t0 = performance.now();
     if (isTiff(name)) {
-      await openTiff(bytes, name);
+      // 元のファイルの場所が分かるときだけ「変換しただけ」とする（閉じるときに確かめない）。
+      // 場所が分からない（ディスク上にないものをドロップした）ときは、閉じると取り戻せないので確かめる
+      await openTiff(bytes, name, { converted: !!path });
       if (path) window.api.docSource(path); // TIFF は PDF として保存するので state.path は空のまま。元のファイルだけ知らせる
       logOpenTime('tiff', bytes, t0);
       return;
@@ -87,7 +89,7 @@ function logOpenTime(kind, bytes, t0) {
 }
 
 /** TIFF は PDF に変換して開く（保存するときは PDF として保存先を尋ねる） */
-async function openTiff(bytes, name) {
+async function openTiff(bytes, name, { converted = true } = {}) {
   const doc = await PDFDocument.create();
   let pr = null;
   const t0 = Date.now();
@@ -119,7 +121,7 @@ async function openTiff(bytes, name) {
   tiffStats.stages.openPdf = performance.now() - t;
   const st = Object.entries(tiffStats.stages).map(([k, v]) => `${k}=${Math.round(v)}`).join(' ');
   logTiff(`open: ${Date.now() - t0}ms ${JSON.stringify(tiffStats.info)} ${st}`);
-  setDirty(true, { converted: true }); // 変換しただけ（編集するまで異常終了時の写しは作らない）
+  setDirty(true, { converted }); // 変換しただけ（編集するまで異常終了時の写しは作らず、閉じるときも確かめない）
   toast(`TIFF（${pageCount()} ページ）を PDF として開きました。保存すると PDF になります。`, 4000);
 }
 
@@ -242,7 +244,8 @@ export async function prepareDropped(files, skipped = []) {
   const items = [];
   for (const f of files) {
     const kind = droppedKind(f.name, f.bytes || new Uint8Array(0));
-    if (kind === 'open') { items.push({ bytes: f.bytes, name: f.name, converted: false }); continue; }
+    // TIFF だけ元の場所を残す（PDF に場所を付けると「保存」で元のファイルを上書きするようになるため付けない）
+    if (kind === 'open') { items.push({ bytes: f.bytes, name: f.name, converted: false, path: isTiff(f.name) && f.path ? f.path : null }); continue; }
     if (!kind) { skipped.push({ name: f.name, reason: t('対応していない形式') }); continue; }
     // 場所は使わずに中身から変換する（ドロップでは場所が分からないことがある）
     const doc = await sourcesToPdf([{ name: f.name, bytes: f.bytes }], skipped);
@@ -270,8 +273,8 @@ async function openDroppedNow(files) {
   await reportSkipped(skipped);
   for (const it of items) {
     if (it.converted) await openResult(it.bytes, it.name);
-    else if (!hasDoc()) await openHere(it.bytes, null, it.name);
-    else await window.api.openInNewWindow(it.bytes, it.name, null);
+    else if (!hasDoc()) await openHere(it.bytes, it.path, it.name);
+    else await window.api.openInNewWindow(it.bytes, it.name, it.path);
   }
 }
 

@@ -1149,9 +1149,10 @@ async function tabTests() {
   }
   if (infoMv.ready) {
     // 最後のタブを × で閉じても、ウィンドウは閉じずに空のタブが残る
-    // （TIFF から変換したタブは保存していない変更がある扱いなので、確認には「保存しない」と答える）
+    // （場所の分からない TIFF から変換したタブは、閉じると取り戻せないので確かめる。「保存しない」と答える）
     await queue('askSave', 1);
     const rc = await tab({ do: 'request-close-any', id: mv });
+    check((await tab({ do: 'askSave-clear' })) === 0, '場所の分からない TIFF を閉じるときは、保存するかを確かめる');
     check(rc.windowOpen && rc.tabs.length === 1 && rc.tabs[0].empty, `最後のタブを閉じても空のタブが残りアプリは終わらない (${JSON.stringify(rc)})`);
     for (const x of rc.tabs) await tab({ do: 'close-any', id: x.id });
   } else {
@@ -1611,13 +1612,32 @@ async function sessionTests(out) {
     await sleep(800);
     let ts = await ses({ do: 'state' });
     check(state.dirty && !ts.tab.recoverySaved, `異常終了時の復元：TIFF を開いただけでは写しを作らない (変更あり ${state.dirty}, 写し ${ts.tab.recoverySaved})`);
+    {
+      const me = (await info()).tabs.find((x) => x.id === self);
+      check(me && me.dirty && !me.mark && !me.ask && !String(me.rawTitle).startsWith('● '), `TIFF を開いただけでは、変更ありの印を付けず、閉じるときも確かめない (${JSON.stringify(me)})`);
+    }
     const o = addObject(0, { type: 'ink', strokes: [[[100, 100], [200, 100]]], rect: [98, 98, 104, 4], color: '#000', width: 2, opacity: 1 });
     await until(async () => (await ses({ do: 'state' })).tab.recoverySaved, 5000);
     ts = await ses({ do: 'state' });
     check(ts.tab.recoverySaved, '異常終了時の復元：TIFF に書き込んだら写しを作る');
+    {
+      const me = (await info()).tabs.find((x) => x.id === self);
+      check(me && me.mark && me.ask && String(me.rawTitle).startsWith('● '), `TIFF に書き込んだら、変更ありの印を付け、閉じるときに確かめる (${JSON.stringify(me)})`);
+    }
     removeObject(o.id);
     window.__recoveryDelay = undefined;
     setDirty(false);
+  }
+  // ドロップ：TIFF は元の場所を残し（見ただけなら確かめずに閉じる）、PDF には場所を付けない（保存で上書きしないように）
+  {
+    const tifBytes = new Uint8Array(await (await fetch('app://local/test/fixtures/multipage.tif')).arrayBuffer());
+    const items = await F.prepareDropped([
+      { name: 'drop.tif', bytes: tifBytes, path: `${out}/drop.tif` },
+      { name: 'drop.pdf', bytes: await makeSample(), path: `${out}/drop.pdf` },
+      { name: 'zip.tif', bytes: tifBytes, path: null }
+    ]);
+    check(items.length === 3 && items[0].path === `${out}/drop.tif` && items[1].path === null && items[2].path === null,
+      `ドロップ：TIFF だけ元の場所を残す (${items.map((x) => `${x.name}=${x.path ? 'あり' : 'なし'}`).join(', ')})`);
   }
 
   // 前回正しく終了しなかったときの写し：「後で」は残す、「復元する」は保存していない状態で開いて写しを消す

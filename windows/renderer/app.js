@@ -183,7 +183,9 @@ async function init() {
     for (const f of [...e.dataTransfer.files]) {
       try {
         const head = new Uint8Array(await f.slice(0, 4097).arrayBuffer());
-        files.push({ name: f.name, bytes: F.droppedKind(f.name, head) ? new Uint8Array(await f.arrayBuffer()) : head });
+        // TIFF は元のファイルの場所も渡す（場所が分かれば、見ただけで閉じるときに保存を確かめない）
+        const where = /\.tiff?$/i.test(f.name) ? window.api.pathForFile(f) : null;
+        files.push({ name: f.name, bytes: F.droppedKind(f.name, head) ? new Uint8Array(await f.arrayBuffer()) : head, path: where });
       } catch {
         files.push({ name: f.name, bytes: new Uint8Array(0) }); // フォルダーなど読めないもの
       }

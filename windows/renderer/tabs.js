@@ -74,7 +74,8 @@
     // ファイルのドロップは新しいタブで開く
     const files = [...e.dataTransfer.files].filter((f) => /\.(pdf|tiff?)$/i.test(f.name));
     const out = [];
-    for (const f of files) out.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+    // TIFF は元のファイルの場所も渡す（場所が分かれば、見ただけで閉じるときに保存を確かめない）
+    for (const f of files) out.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()), path: /\.tiff?$/i.test(f.name) ? window.tabs.pathForFile(f) : null });
     if (out.length) window.tabs.open(out);
   });
   // タブの何もないところをダブルクリックで新しいタブ

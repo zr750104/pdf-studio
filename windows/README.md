@@ -40,6 +40,12 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.27 の変更点
+
+- TIFF を開いて見ただけなら、閉じる・終了・自動更新のときに保存を確かめない（main.js needsAsk）。タブとタイトルの「●」も付けない。state.dirty は true のままなので「保存」はできる。編集したら確かめる
+- 元のファイルの場所が分からない TIFF は、これまでどおり確かめ、異常終了時の写しも作る（openTiff の converted: !!path）。ドロップしたファイルの場所は preload の webUtils.getPathForFile で取り、TIFF のときだけ渡す（PDF に場所を付けると「保存」で元のファイルを上書きするようになるため付けない）
+- 自動テストの間、Mac でアプリが前面に出てキー入力を奪わないように、webContents.focus() を何もしないようにした（Mac の Electron はこれでアプリごと前面に出す）
+
 ## 1.5.26 の変更点
 
 - しおりの編集（doc.js readOutline / writeOutline / editOutline、panels.js outlineAction）。pdf.js の getOutline を { title, page, pos, url, items, closed, src } の木に読み、lib の元のしおりの辞書（src）を同じ形のときだけ対応づける。書き戻すときは元の辞書から構造（Title・Parent・Prev・Next・First・Last・Count）以外をそのまま写す（色・太字・動作・名前の移動先が残る）。閉じたしおりは Count を負に。古いしおりの辞書は消す（消した名前がファイルに残らない）。changeStructure の中で書くので取り消せる。URL のしおりは選ぶだけで、Ctrl + クリックで開く。元のしおりがあるのに pdf.js の読み取りと対応づけられないときは書き換えを断る（items.unmatched）。操作中の重ねての操作は受け付けない

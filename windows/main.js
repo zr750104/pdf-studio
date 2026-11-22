@@ -32,6 +32,9 @@ if (TEST_HIDDEN) {
     if (wc && !wc.isDestroyed()) wc.focus(); else this.webContents?.focus();
   };
   if (process.platform === 'darwin') app.dock?.hide();
+  // Mac の Electron は webContents.focus() でアプリごと前面に出す（キー入力とメニューバーを奪う）ので、
+  // テストでは何もしない。ページには focus emulation でフォーカスがあるように見せている
+  if (process.platform === 'darwin') app.on('web-contents-created', (_e, wc) => { wc.focus = () => {}; });
   // 見えないアプリは Mac の省電力（App Nap）でタイマーが間引かれ、テストが止まることがあるので止めない
   app.whenReady().then(() => require('electron').powerSaveBlocker.start('prevent-app-suspension'));
 }
@@ -330,7 +333,7 @@ const tabLabel = (tab) => {
 function sendStrip(host, rects = paneRects(host)) {
   if (!host || host.win.isDestroyed()) return;
   host.win.webContents.send('tabs:state', {
-    tabs: host.tabs.map((t) => ({ id: t.id, title: tabLabel(t), dirty: t.dirty })),
+    tabs: host.tabs.map((t) => ({ id: t.id, title: tabLabel(t), dirty: t.dirty && !t.convertedOnly })),
     active: host.active?.id ?? null,
     mode: host.mode,
     frames: rects.length > 1 ? rects.map((r) => ({ id: r.tab.id, ...r.rect })) : [],
@@ -397,6 +400,9 @@ async function askSave(win, tab = null, { force = false } = {}) {
   return response;
 }
 
+// 閉じるときに保存を確かめるタブ。TIFF などを変換して開いただけ（元のファイルが残っている）なら確かめない
+const needsAsk = (t) => t.dirty && !t.forceClose && !t.convertedOnly;
+
 /** タブを閉じる（保存していなければ確かめる）。閉じなかったら false */
 async function requestCloseTab(tab) {
   if (windows.get(tab.id) !== tab) return true; // もう閉じている
@@ -404,7 +410,7 @@ async function requestCloseTab(tab) {
   // 確認を表示している間は、ほかの閉じる操作を受け付けない（確認が重なって出ないように）
   if (host.asking) return false;
   host.closing = false;
-  if (tab.dirty && !tab.forceClose) {
+  if (needsAsk(tab)) {
     activateTab(host, tab);
     host.asking = true;
     let r;
@@ -488,7 +494,7 @@ function moveTabToNewWindow(tab) {
 /** ウィンドウを閉じるとき、保存していないタブを 1 つずつ確かめる */
 function onWindowClose(host, e) {
   if (host.forceClose) return;
-  const dirty = host.tabs.filter((t) => t.dirty && !t.forceClose);
+  const dirty = host.tabs.filter(needsAsk);
   if (!dirty.length) return;
   e.preventDefault();
   if (host.asking) return null;
@@ -1238,7 +1244,9 @@ ipcMain.on('tabs:open', (e, files) => {
   if (!h || !Array.isArray(files)) return;
   for (const f of files) {
     if (!f || typeof f.name !== 'string' || !(f.bytes instanceof Uint8Array)) continue;
-    openInHost(h, { bytes: Buffer.from(f.bytes), name: path.basename(f.name), path: null });
+    // 場所は TIFF のときだけ受け取る（PDF は場所なしで開く。保存で元のファイルを上書きしないように）
+    const where = typeof f.path === 'string' && /\.tiff?$/i.test(f.path) && path.isAbsolute(f.path) ? f.path : null;
+    openInHost(h, { bytes: Buffer.from(f.bytes), name: path.basename(f.name), path: where });
   }
 });
 
@@ -1254,7 +1262,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
   if (cmd === 'size') { entry.win.setSize(arg[0], arg[1] + STRIP_H); layout(entry.host); return true; }
   if (cmd === 'tabs') {
     const h = entry.host;
-    return { self: entry.id, active: h.active?.id ?? null, mode: h.mode, windows: hosts.size, tabs: h.tabs.map((t) => ({ id: t.id, title: tabLabel(t), dirty: t.dirty, visible: paneRects(h).some((r) => r.tab === t) })), panes: paneRects(h).map((r) => ({ id: r.tab.id, ...r.rect })) };
+    return { self: entry.id, active: h.active?.id ?? null, mode: h.mode, windows: hosts.size, tabs: h.tabs.map((t) => ({ id: t.id, title: tabLabel(t), dirty: t.dirty, mark: t.dirty && !t.convertedOnly, ask: needsAsk(t), rawTitle: t.title, visible: paneRects(h).some((r) => r.tab === t) })), panes: paneRects(h).map((r) => ({ id: r.tab.id, ...r.rect })) };
   }
   if (cmd === 'tab') {
     const h = entry.host;
@@ -1618,7 +1626,7 @@ if (!app.requestSingleInstanceLock()) {
     if (!SELFTEST) { const h = lastHost; if (h) whenReady(h, () => setTimeout(() => offerRecovery(lastHost).catch((e) => updater.log('ERROR', e)), 1500)); }
     if (SELFTEST) BrowserWindow.getAllWindows()[0]?.setSize(1400, 900 + STRIP_H);
     else {
-      updater.setUnsavedChecker(() => [...windows.values()].some((e) => e.dirty));
+      updater.setUnsavedChecker(() => [...windows.values()].some((e) => e.dirty && !e.convertedOnly));
       updater.startAutoCheck();
       // TIFF の既定のアプリが PDF Studio でなければ設定の手順を案内する（ほかの起動時のお知らせと重ならないよう遅らせる）
       setTimeout(() => defaultapp.checkTiffDefault({ installed: updater.isInstalled(), log: updater.log }).catch((e) => updater.log('ERROR', e)), 12000);

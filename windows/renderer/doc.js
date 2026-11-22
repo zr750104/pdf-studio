@@ -53,7 +53,7 @@ export function setDirty(d = true, { converted = false } = {}) {
   state.convertedOnly = d && converted;
   if (d && !converted) scheduleRecovery(); else { clearTimeout(recovery.timer); recovery.timer = null; }
   window.api.setDirty(d, state.convertedOnly);
-  window.api.setTitle(`${d ? '● ' : ''}${t(state.name)} - PDF Studio`);
+  window.api.setTitle(`${d && !converted ? '● ' : ''}${t(state.name)} - PDF Studio`);
 }
 
 // ---------------------------------------------------------------- 異常終了時の写し

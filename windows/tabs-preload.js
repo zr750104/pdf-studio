@@ -1,5 +1,5 @@
 // タブバー（ウィンドウ上部）に公開する API。文書の画面（preload.js）とは別
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('tabs', {
   ready: () => ipcRenderer.send('tabs:ready'),
@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('tabs', {
   move: (id, index) => ipcRenderer.send('tabs:move', id, index),
   contextMenu: (id) => ipcRenderer.send('tabs:menu', id),
   layoutMenu: () => ipcRenderer.send('tabs:layout-menu'),
+  // ドロップしたファイルの場所（分からないときは null）。TIFF の元のファイルを知るためだけに使う
+  pathForFile: (f) => { try { return webUtils.getPathForFile(f) || null; } catch { return null; } },
   open: (files) => ipcRenderer.send('tabs:open', files),
   onState: (cb) => ipcRenderer.on('tabs:state', (e, s) => cb(s))
 });
