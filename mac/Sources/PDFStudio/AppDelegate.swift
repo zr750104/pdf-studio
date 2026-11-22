@@ -334,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item("縮尺を合わせる（キャリブレーション）...", #selector(W.calibrateScale(_:))),
             sep(),
             item("文書を比較…", #selector(W.compareDocuments(_:))),
+            item("重ねて比較（図面）…", #selector(W.compareOverlay(_:))),
             item("文書のプロパティ…", #selector(W.editProperties(_:)), "d", [.command, .option])
         ])
 

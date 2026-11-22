@@ -238,7 +238,24 @@
   "選択したしおりを 1 段上げる": "Outdent the selected bookmark",
   "選択したしおりを 1 段下げる": "Indent the selected bookmark",
   "選択したしおりを上へ": "Move the selected bookmark up",
-  "選択したしおりを下へ": "Move the selected bookmark down"
+  "選択したしおりを下へ": "Move the selected bookmark down",
+  "{n} / {t} ページ": "Page {n} of {t}",
+  "{n} ページのうち {c} ページに違いがあります": "{c} of {n} pages have differences",
+  "この文書は重ねて比較できません": "This document cannot be overlay-compared",
+  "パスワードで保護された文書とは比較できません": "Password-protected documents cannot be compared",
+  "ページ {n} は大きさが違います": "Page {n} has a different size",
+  "ページ数が違います（{a} / {b}）。先頭から {n} ページだけを比べました": "The page counts differ ({a} / {b}). Only the first {n} pages were compared",
+  "回転や拡大縮小の違いは補正しません": "Differences in rotation or scale are not corrected",
+  "文書の作成者がコピーを許可していません。": "The author of this document does not allow copying.",
+  "比較するファイルを開けませんでした": "Could not open the file to compare",
+  "灰：共通の線": "Gray: lines in both",
+  "赤：古い版だけにある線": "Red: lines only in the old version",
+  "重ねて比較しています": "Overlaying and comparing",
+  "重ねて比較しました": "Overlay comparison complete",
+  "重ねて比較する（新しい版の）ファイルを選んでください": "Choose the (newer) file to overlay-compare",
+  "重ねて比較できませんでした": "Could not overlay and compare",
+  "重ねて比較（図面）…": "Overlay Compare (Drawings)…",
+  "青：新しい版だけにある線": "Blue: lines only in the new version"
  },
  "patterns": [
   [

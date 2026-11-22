@@ -173,6 +173,7 @@ enum SelfTest {
         tiffTests(outDir: outDir)
         dropTests(outDir: outDir)
         outlineTests()
+        overlayTests(outDir: outDir)
         updateTests()
         uiTextTests(doc: doc, outDir: outDir)
         interactionTests(doc: doc)
@@ -350,6 +351,49 @@ enum SelfTest {
         let redone = shape() == "A(C),B"
         check(ok && edited && topCantMove && undone && redone && savedShape == "C/B2" && destOk,
               "しおり：並べ替え・段の上げ下げ・名前の変更・削除を元に戻せ、保存しても形が残る (\(log.joined(separator: " → ")), やり直し \(shape()), 保存後 \(savedShape), 移動先 \(destOk))")
+    }
+
+    /// 重ねて比較（Windows 版と同じ図面）：右に 6pt・上に 4pt ずれた版に 1 本足したものを比べる
+    static func overlayTests(outDir: URL) {
+        func drawing(_ shift: CGPoint, extra: Bool) -> PDFDocument? {
+            let data = NSMutableData()
+            var box = CGRect(x: 0, y: 0, width: 842, height: 595)   // A4 横
+            guard let consumer = CGDataConsumer(data: data as CFMutableData), let ctx = CGContext(consumer: consumer, mediaBox: &box, nil) else { return nil }
+            ctx.beginPDFPage(nil)
+            func line(_ x1: CGFloat, _ y1: CGFloat, _ x2: CGFloat, _ y2: CGFloat, _ w: CGFloat = 1.2) {
+                ctx.setLineWidth(w)
+                ctx.move(to: CGPoint(x: x1 + shift.x, y: y1 + shift.y)); ctx.addLine(to: CGPoint(x: x2 + shift.x, y: y2 + shift.y)); ctx.strokePath()
+            }
+            line(40, 40, 800, 40); line(800, 40, 800, 555); line(800, 555, 40, 555); line(40, 555, 40, 40)   // 枠
+            for k in 0..<12 { line(80 + CGFloat(k) * 55, 80, 120 + CGFloat(k) * 55, 300 + CGFloat(k % 3) * 60, 0.8) }   // 図
+            line(100, 420, 500, 420, 2); line(300, 330, 300, 520, 2)
+            if extra { line(560, 120, 760, 260, 1.5) }   // 新しい版で足した線
+            ctx.endPDFPage(); ctx.closePDF()
+            return PDFDocument(data: data as Data)
+        }
+        guard let old = drawing(.zero, extra: false), let new = drawing(CGPoint(x: 6, y: 4), extra: true),
+              let pa = old.page(at: 0), let pb = new.page(at: 0) else { check(false, "重ねて比較：図面を作る"); return }
+        let t0 = Date()
+        guard let r = Overlay.overlay(pa, pb) else { check(false, "重ねて比較：重ねる"); return }
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        let s = 200.0 / 72
+        let okShift = abs(Double(r.shiftPx.0) + 6 * s) <= 2 && abs(Double(r.shiftPx.1) - 4 * s) <= 2
+        check(okShift, "重ねて比較：ずれを見つけて合わせる (\(r.shiftPx.0), \(r.shiftPx.1) 画素 / 期待 \(String(format: "%.1f", -6 * s)), \(String(format: "%.1f", 4 * s)) → \(r.shiftMm.0), \(r.shiftMm.1) mm)")
+        check(r.added > 300 && Double(r.removed) < Double(r.added) * 0.1 && r.changed,
+              "重ねて比較：足した線だけが新しい版だけの線になる（縁は色づかない） (新 \(r.added) / 旧 \(r.removed) / 線全体 \(r.total), \(ms)ms)")
+        if let same = Overlay.overlay(pa, pa) {
+            check(same.added + same.removed == 0 && same.shiftPx == (0, 0) && !same.changed, "重ねて比較：同じ図面同士は違いなし (\(same.added + same.removed))")
+        } else { check(false, "重ねて比較：同じ図面同士") }
+        // 文書どうし：結果は古い版のページの大きさで、ページ数は少ない方まで
+        let longer = PDFDocument(data: new.dataRepresentation()!)!
+        if let p = Operations.blankPage() { longer.insert(p, at: 1) }
+        let c = Overlay.compare(old, longer, progress: { _, _ in }, cancelled: { false })
+        let pageOk = c.map { $0.doc.pageCount == 1 && $0.changed == 1 && $0.doc.page(at: 0)!.bounds(for: .mediaBox).size == CGSize(width: 842, height: 595) } ?? false
+        check(pageOk && c?.notes.count == 1, "重ねて比較：結果の PDF を作り、ページ数の違いを知らせる (\(c?.doc.pageCount ?? -1) ページ, 違い \(c?.changed ?? -1), \(c?.notes ?? []))")
+        if let png = c?.doc.page(at: 0)?.thumbnail(of: NSSize(width: 1200, height: 850), for: .mediaBox).tiffRepresentation {
+            try? NSBitmapImageRep(data: png)?.representation(using: .png, properties: [:])?.write(to: outDir.appendingPathComponent("overlay-result.png"))
+        }
+        check(Overlay.compare(old, new, progress: { _, _ in }, cancelled: { true }) == nil, "重ねて比較：中止できる")
     }
 
     /// 実際のマウス・キーのイベントで操作する（テンキーの拡大・縮小、手のひらの慣性スクロール）

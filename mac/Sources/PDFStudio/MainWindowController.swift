@@ -819,6 +819,48 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let oldName = studio.displayName ?? ""
         ReportWindow.show(title: "比較: \(oldName) ↔ \(url.lastPathComponent)", text: report)
     }
+
+    /// 図面の重ね合わせ比較：今の文書（古い版）と選んだファイル（新しい版）を重ね、違いを色分けした PDF を新しい文書で開く
+    @objc func compareOverlay(_ sender: Any?) {
+        // ページの画像を新しい PDF に書き出すので、コピーが許されている文書だけ
+        guard studio.pdf.allowsCopying else {
+            Dialog.alert("この文書は重ねて比較できません", L("文書の作成者がコピーを許可していません。"), style: .warning)
+            return
+        }
+        guard let url = Dialog.openFiles(types: [.pdf, .tiff], multiple: false, title: "重ねて比較する（新しい版の）ファイルを選んでください").first else { return }
+        // 表示中の文書には裏から触らない（写しを作って裏で描く）
+        guard let oldData = studio.pdf.dataRepresentation() else { return }
+        let base = (studio.displayName as NSString?)?.deletingPathExtension ?? L("文書")
+        let progress = ProgressSheet(title: L("重ねて比較しています"), total: 1)
+        if let w = hostWindow ?? window { progress.begin(on: w) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { () -> (doc: PDFDocument, pages: Int, changed: Int, notes: [String])? in
+                guard let old = PDFDocument(data: oldData) else { throw StudioError.message(L("PDF として読み込めませんでした。")) }
+                let other: PDFDocument?
+                if TiffImport.isTiff(url) {
+                    other = PDFDocument(data: try TiffImport.pdfData(from: try Data(contentsOf: url, options: .mappedIfSafe)))
+                } else {
+                    other = PDFDocument(url: url)
+                }
+                guard let other else { throw StudioError.message(L("比較するファイルを開けませんでした")) }
+                if other.isLocked { throw StudioError.message(L("パスワードで保護された文書とは比較できません")) }
+                return Overlay.compare(old, other, progress: { done, total in
+                    DispatchQueue.main.async { progress.update(done, total: total, L("{n} / {t} ページ").replacingOccurrences(of: "{n}", with: "\(done)").replacingOccurrences(of: "{t}", with: "\(total)")) }
+                }, cancelled: { progress.cancelled })
+            }
+            DispatchQueue.main.async {
+                progress.end()
+                switch result {
+                case .failure(let e): Dialog.alert("重ねて比較できませんでした", e.localizedDescription, style: .warning)
+                case .success(nil): break  // 中止
+                case .success(let r?):
+                    let summary = L("{n} ページのうち {c} ページに違いがあります").replacingOccurrences(of: "{n}", with: "\(r.pages)").replacingOccurrences(of: "{c}", with: "\(r.changed)")
+                    Dialog.alert("重ねて比較しました", summary + (r.notes.isEmpty ? "" : "\n\n" + r.notes.joined(separator: "\n")) + "\n\n" + L("回転や拡大縮小の違いは補正しません"))
+                    if r.doc.pageCount > 0 { PDFStudioDocument.openNew(r.doc, title: "\(base)_\(L("重ねて比較")).pdf") }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - 進捗シート
