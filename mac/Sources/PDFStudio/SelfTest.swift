@@ -350,6 +350,15 @@ enum SelfTest {
         let undone = shape() == "A,B,C"
         um.redo(); um.redo()
         let redone = shape() == "A(C),B"
+        // ページの操作（文書が入れ替わる）を取り消したあとも、しおりの取り消しが効く
+        step { OutlineEdit.move(b, by: 1, in: d) }   // A(C),B → A(C),B は端なので動かない
+        step { _ = OutlineEdit.outdent(c, in: d) }; let beforeStruct = shape()   // A,C,B
+        step { d.performStructuralChange("ページの回転") { pdf in pdf.page(at: 0)?.rotation = 90 } }
+        um.undo()   // ページの回転を取り消す（文書が入れ替わる）
+        let replaced = shape() == beforeStruct
+        um.undo()   // しおりの「1 段上げる」を取り消す
+        let afterReplace = shape() == "A(C),B"
+        check(replaced && afterReplace, "しおり：ページの操作を取り消したあとも、しおりの取り消しが効く (\(beforeStruct) → \(shape()))")
         check(ok && edited && topCantMove && undone && redone && savedShape == "C/B2" && destOk,
               "しおり：並べ替え・段の上げ下げ・名前の変更・削除を元に戻せ、保存しても形が残る (\(log.joined(separator: " → ")), やり直し \(shape()), 保存後 \(savedShape), 移動先 \(destOk))")
     }
@@ -501,6 +510,44 @@ enum SelfTest {
         }
         if let png = saved?.page(at: 0)?.thumbnail(of: NSSize(width: 600, height: 850), for: .mediaBox).tiffRepresentation {
             try? NSBitmapImageRep(data: png)?.representation(using: .png, properties: [:])?.write(to: outDir.appendingPathComponent("pagesize-result.png"))
+        }
+        // ポップアップの付いた付箋：そろえて保存しても、ポップアップは 1 つで、新しい位置にある
+        do {
+            let pd = PDFDocument()
+            if let p = Operations.blankPage(size: CGSize(width: 612, height: 792)) { pd.insert(p, at: 0) }
+            let note = PDFAnnotation(bounds: CGRect(x: 100, y: 100, width: 20, height: 20), forType: .text, withProperties: nil)
+            note.contents = "付箋"
+            let pop = PDFAnnotation(bounds: CGRect(x: 200, y: 200, width: 150, height: 100), forType: .popup, withProperties: nil)
+            note.popup = pop
+            pd.page(at: 0)?.addAnnotation(note); pd.page(at: 0)?.addAnnotation(pop)
+            // 開き直した文書で試す（ファイルから開いたときと同じ形）
+            if let re = pd.dataRepresentation().flatMap(PDFDocument.init(data:)), let rp = re.page(at: 0), let plan = PageSize.plan(rp, paper: PageSize.papers[1].size, onlyShrink: false) {
+                PageSize.normalize(re, pages: [0], paper: PageSize.papers[1].size, onlyShrink: false)
+                let again = Compositor.serialize(re).flatMap(PDFDocument.init(data:))
+                let pops = again?.page(at: 0)?.annotations.filter { $0.type == "Popup" } ?? []
+                let want = CGRect(x: 200, y: 200, width: 150, height: 100).applying(plan.transform)
+                check(pops.count == 1 && abs(pops[0].bounds.minX - want.minX) < 1.5 && abs(pops[0].bounds.minY - want.minY) < 1.5,
+                      "ページの大きさをそろえる：ポップアップは 1 つのまま新しい位置へ (\(pops.map { "\($0.bounds)" }))")
+            } else { check(false, "ページの大きさをそろえる：ポップアップの準備") }
+        }
+        // ラベルを消した測定も、線と縮尺を直す（測った長さは変わらない）
+        do {
+            let md = PDFDocument()
+            if let p = Operations.blankPage(size: CGSize(width: 612, height: 792)) { md.insert(p, at: 0) }
+            let mm = Measure.make(kind: "distance", points: [CGPoint(x: 100, y: 400), CGPoint(x: 400, y: 400)], scale: .standard, color: .red, lineWidth: 1)
+            md.page(at: 0)?.addAnnotation(mm.shape)   // ラベルは付けない
+            let before = Measure.data(of: mm.shape).map { Measure.value(kind: $0.kind, points: Measure.absolute($0, origin: mm.shape.bounds.origin), scale: $0.scale).text } ?? ""
+            if let plan = md.page(at: 0).flatMap({ PageSize.plan($0, paper: PageSize.papers[1].size, onlyShrink: false) }) {
+                PageSize.normalize(md, pages: [0], paper: PageSize.papers[1].size, onlyShrink: false)
+                let sh = md.page(at: 0)?.annotations.first { Measure.data(of: $0) != nil }
+                let dd = sh.flatMap { Measure.data(of: $0) }
+                let pts = dd.map { Measure.absolute($0, origin: sh!.bounds.origin) } ?? []
+                let after = dd.map { Measure.value(kind: $0.kind, points: pts, scale: $0.scale).text } ?? "-"
+                let want = CGPoint(x: 100, y: 400).applying(plan.transform)
+                let endOk = sh.map { abs($0.bounds.minX + $0.startPoint.x - want.x) < 1.5 && abs($0.bounds.minY + $0.startPoint.y - want.y) < 1.5 } ?? false
+                check(after == before && pts.count == 2 && abs(pts[0].x - want.x) < 1.5 && endOk,
+                      "ページの大きさをそろえる：ラベルを消した測定も線と縮尺を直す (\(before) → \(after))")
+            } else { check(false, "ページの大きさをそろえる：ラベルのない測定の準備") }
         }
         // 大きいページだけ縮める：A4 のページを A3 にしても拡大しない（用紙だけ大きくなり、内容は同じ大きさで中央）
         if let small = Operations.blankPage(size: PageSize.papers[1].size), let plan = PageSize.plan(small, paper: PageSize.papers[0].size, onlyShrink: true) {

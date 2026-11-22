@@ -881,7 +881,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                     other = PDFDocument(url: url)
                 }
                 guard let other else { throw StudioError.message(L("比較するファイルを開けませんでした")) }
-                if other.isLocked { throw StudioError.message(L("パスワードで保護された文書とは比較できません")) }
+                if other.isLocked || old.isLocked { throw StudioError.message(L("パスワードで保護された文書とは比較できません")) }
+                if !other.allowsCopying { throw StudioError.message(L("文書の作成者がコピーを許可していません。")) }
                 return Overlay.compare(old, other, progress: { done, total in
                     DispatchQueue.main.async { progress.update(done, total: total, L("{n} / {t} ページ").replacingOccurrences(of: "{n}", with: "\(done)").replacingOccurrences(of: "{t}", with: "\(total)")) }
                 }, cancelled: { progress.cancelled })

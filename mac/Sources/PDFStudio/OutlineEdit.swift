@@ -2,7 +2,9 @@ import AppKit
 import PDFKit
 
 /// しおりの編集（追加・削除・名前の変更・上下の並べ替え・1 段下げる／上げる）。どれも元に戻せる。
-/// 元に戻すには、逆の操作だけを登録する（文書全体を書き出さない）。変更ありの印は取り消しの仕組みが付ける
+/// 元に戻すには、逆の操作だけを登録する（文書全体は書き出さない）。変更ありの印は取り消しの仕組みが付ける。
+/// 取り消しは、しおりそのものではなく「上からの位置（番号の並び）」で覚え、そのときの文書からたどり直す
+/// （ページの操作を取り消すと文書が入れ替わり、しおりも別のものになるため）
 enum OutlineEdit {
     /// しおりの置き場所（親と、親の中での順番）
     struct Place { let parent: PDFOutline; let index: Int }
@@ -11,6 +13,21 @@ enum OutlineEdit {
         guard let parent = o.parent else { return nil }
         for i in 0..<parent.numberOfChildren where parent.child(at: i) === o { return Place(parent: parent, index: i) }
         return nil
+    }
+
+    /// いちばん上のしおりからの番号の並び（いちばん上そのものは空）
+    static func path(of o: PDFOutline) -> [Int]? {
+        var path: [Int] = []
+        var x = o
+        while let p = place(of: x) { path.insert(p.index, at: 0); x = p.parent }
+        return path
+    }
+
+    /// 番号の並びから、今の文書のしおりをたどる
+    static func resolve(_ path: [Int], in doc: PDFStudioDocument) -> PDFOutline? {
+        var x = doc.pdf.outlineRoot
+        for i in path { guard let c = x, i < c.numberOfChildren else { return nil }; x = c.child(at: i) }
+        return x
     }
 
     private static func register(_ doc: PDFStudioDocument, _ name: String, _ undo: @escaping (PDFStudioDocument) -> Void) {
@@ -29,7 +46,12 @@ enum OutlineEdit {
         guard let from = place(of: o), parent !== o, !isAncestor(o, of: parent) else { return false }
         o.removeFromParent()
         parent.insertChild(o, at: max(0, min(index, parent.numberOfChildren)))
-        register(doc, name) { d in relocate(o, to: from.parent, at: from.index, in: d, name: name) }
+        // 動かしたあとの位置で覚える（元の親は、動かしたあとも同じ位置にある）
+        guard let now = path(of: o), let back = path(of: from.parent) else { return true }
+        register(doc, name) { d in
+            guard let x = resolve(now, in: d), let p = resolve(back, in: d) else { return }
+            relocate(x, to: p, at: from.index, in: d, name: name)
+        }
         return true
     }
 
@@ -65,21 +87,22 @@ enum OutlineEdit {
     /// 追加する（取り消すと消える）
     static func insert(_ o: PDFOutline, into parent: PDFOutline, at index: Int, in doc: PDFStudioDocument) {
         parent.insertChild(o, at: max(0, min(index, parent.numberOfChildren)))
-        register(doc, "しおりを追加") { d in remove(o, in: d) }
+        guard let now = path(of: o) else { return }
+        register(doc, "しおりを追加") { d in if let x = resolve(now, in: d) { remove(x, in: d) } }
     }
 
     /// 削除する（取り消すと元の場所に戻る）
     static func remove(_ o: PDFOutline, in doc: PDFStudioDocument) {
-        guard let p = place(of: o) else { return }
+        guard let p = place(of: o), let parentPath = path(of: p.parent) else { return }
         o.removeFromParent()
-        register(doc, "しおりを削除") { d in insert(o, into: p.parent, at: p.index, in: d) }
+        register(doc, "しおりを削除") { d in if let parent = resolve(parentPath, in: d) { insert(o, into: parent, at: p.index, in: d) } }
     }
 
     /// 名前を変える（取り消すと元の名前に戻る）
     static func rename(_ o: PDFOutline, to label: String, in doc: PDFStudioDocument) {
         let old = o.label ?? ""
-        guard old != label else { return }
+        guard old != label, let now = path(of: o) else { o.label = label; return }
         o.label = label
-        register(doc, "しおりの名前を変更") { d in rename(o, to: old, in: d) }
+        register(doc, "しおりの名前を変更") { d in if let x = resolve(now, in: d) { rename(x, to: old, in: d) } }
     }
 }

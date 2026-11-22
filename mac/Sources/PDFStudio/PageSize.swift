@@ -94,6 +94,8 @@ enum PageSize {
         var result = Result()
         // 元のページ → (新しいページ, 変換)。リンクとしおりの移動先を直すのに使う
         var moved: [ObjectIdentifier: (page: PDFPage, t: CGAffineTransform)] = [:]
+        // 元のページは最後まで持っておく（解放されると、後から作るページと同じ番号になることがある）
+        var originals: [PDFPage] = []
         for i in pages {
             guard let page = doc.page(at: i), let plan = plan(page, paper: paper, onlyShrink: onlyShrink),
                   let np = redraw(page, transform: plan.transform, size: plan.size) else { continue }
@@ -109,21 +111,35 @@ enum PageSize {
                 inMeasure.insert(ObjectIdentifier(a))
                 if let label { inMeasure.insert(ObjectIdentifier(label)) }
             }
+            // ポップアップ：一覧にある本物と、親が持つものが別のオブジェクトのことがある（親が持つものは仮の枠）。
+            // 本物を親に付け直してから動かす（そのままだと保存したときに 2 つになったり、位置がずれたりする）
+            let pops = annots.filter { $0.type == "Popup" }
+            let owners = annots.filter { $0.popup != nil && $0.type != "Popup" }
+            var pairs: [(owner: PDFAnnotation, pop: PDFAnnotation)] = []
+            for pop in pops {
+                let parent = (pop.value(forAnnotationKey: .parent) as? PDFAnnotation).flatMap { p in owners.first { $0 === p } }
+                    ?? (owners.count == 1 && pops.count == 1 ? owners[0] : nil)
+                if let parent { pairs.append((parent, pop)) }
+            }
+            for pr in pairs { pr.owner.popup = nil }
             for a in annots {
                 page.removeAnnotation(a)
                 if !inMeasure.contains(ObjectIdentifier(a)) { move(a, plan.transform, plan.scale) }
                 np.addAnnotation(a)
             }
+            for pr in pairs { pr.owner.popup = pr.pop }
             for m in measures {
                 let pts = Measure.absolute(m.data, origin: m.shape.bounds.origin).map { $0.applying(plan.transform) }
                 var sc = m.data.scale
                 // 1pt あたりの実寸を直して、測った長さ（実寸）を変えない
                 sc.factor /= Double(plan.scale)
                 if let r = sc.ratio { sc.ratio = r / Double(plan.scale); sc.label = "1:" + String(format: "%g", (r / Double(plan.scale) * 100).rounded() / 100) }
-                if let label = m.label { Measure.apply(kind: m.data.kind, points: pts, scale: sc, shape: m.shape, label: label) }
-                else { m.shape.bounds = scaleRect(m.shape.bounds, plan.transform) }
+                // ラベルを消した測定も、図形と測定の情報を同じように直す（ラベルは作るだけで使わない）
+                let label = m.label ?? PDFAnnotation(bounds: CGRect(x: 0, y: 0, width: 1, height: 1), forType: .freeText, withProperties: nil)
+                Measure.apply(kind: m.data.kind, points: pts, scale: sc, shape: m.shape, label: label)
             }
             moved[ObjectIdentifier(page)] = (np, plan.transform)
+            originals.append(page)
             doc.removePage(at: i)
             doc.insert(np, at: i)
             result.changed += 1
@@ -151,6 +167,7 @@ enum PageSize {
             for k in 0..<o.numberOfChildren { if let c = o.child(at: k) { walk(c) } }
         }
         if let root = doc.outlineRoot { walk(root) }
+        withExtendedLifetime(originals) {}
         return result
     }
 }
