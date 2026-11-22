@@ -68,6 +68,9 @@ final class EditorPDFView: PDFView {
 
     private func setup() {
         minScaleFactor = 0.1
+        // ファイルのドロップは自分で受ける（PDFView に任せると NSDocument を通さずに中身が入れ替わる）
+        acceptsDraggedFiles = false
+        registerForDraggedTypes([.fileURL])
         overlay.editor = self
         overlay.frame = bounds
         overlay.autoresizingMask = [.width, .height]
@@ -93,6 +96,24 @@ final class EditorPDFView: PDFView {
     }
 
     @objc private func refreshOverlay() { overlay.needsDisplay = true }
+
+    // MARK: ファイルのドロップ（PDF・TIFF は開き、画像・Word・テキストは PDF にして開く）
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        DropOpen.fileURLs(sender).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        DropOpen.fileURLs(sender).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = DropOpen.fileURLs(sender)
+        guard !urls.isEmpty else { return super.performDragOperation(sender) }
+        // ドロップの処理が終わってから開く（ダイアログやウィンドウを出すため）
+        DispatchQueue.main.async { DropOpen.open(urls) }
+        return true
+    }
 
     @objc private func widgetHit(_ n: Notification) {
         // フォーム入力などでも変更ありとみなす

@@ -171,6 +171,8 @@ enum SelfTest {
         check(blank != nil, "空白ページ作成")
 
         tiffTests(outDir: outDir)
+        dropTests(outDir: outDir)
+        outlineTests()
         updateTests()
         uiTextTests(doc: doc, outDir: outDir)
         interactionTests(doc: doc)
@@ -248,6 +250,14 @@ enum SelfTest {
             let s = TiffImport.lastStats
             check(s.jpeg == 0 && s.passthrough + s.reencodedG4 == s.pages, "白黒の TIFF は白黒のまま（G4）入れる (そのまま \(s.passthrough)・G4 \(s.reencodedG4) / \(s.pages))")
         }
+        // TIFF を開いただけなら変更ありにしない（閉じるときに確かめない）。編集したら変更ありになる。ほかの新しい文書は変更あり
+        do {
+            let t = PDFStudioDocument.makeNew(PDFDocument(), title: "view.pdf", edited: false)
+            let viewOnly = !t.isDocumentEdited
+            t.updateChangeCount(.changeDone)
+            let made = PDFStudioDocument.makeNew(PDFDocument(), title: "made.pdf")
+            check(viewOnly && t.isDocumentEdited && made.isDocumentEdited, "TIFF を開いただけなら閉じるときに確かめない（編集したら確かめる、作った文書は確かめる）")
+        }
         // 大きな TIFF（ユーザーと同じ 256 ページの白黒スキャン）の速さ。PDFSTUDIO_BENCH_TIFF で指定したときだけ
         if let bench = ProcessInfo.processInfo.environment["PDFSTUDIO_BENCH_TIFF"], let data = try? Data(contentsOf: URL(fileURLWithPath: bench), options: .mappedIfSafe) {
             let t = Date()
@@ -261,6 +271,85 @@ enum SelfTest {
             _ = pdf?.page(at: 200)?.thumbnail(of: NSSize(width: 1200, height: 1700), for: .mediaBox)
             check(pdf != nil && p0 != nil && conv + first < 5, "256 ページの TIFF を速く開く (変換 \(String(format: "%.2f", conv)) 秒・最初のページ \(String(format: "%.2f", first)) 秒・201 ページ目 \(String(format: "%.2f", Date().timeIntervalSince(t3))) 秒, \(pdf?.pageCount ?? 0) ページ, \((pdfData?.count ?? 0) / 1_000_000) MB, そのまま \(TiffImport.lastStats.passthrough))")
         }
+    }
+
+    /// ドロップ：PDF・TIFF は開く、画像・Word・テキストは 1 ファイルずつ PDF にする、ほかは名前を出して知らせる
+    static func dropTests(outDir: URL) {
+        let dir = outDir.appendingPathComponent("drop")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let img = NSImage(size: NSSize(width: 200, height: 100), flipped: false) { r in NSColor.red.setFill(); r.fill(); return true }
+        let png = dir.appendingPathComponent("画像.png")
+        if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) { try? rep.representation(using: .png, properties: [:])?.write(to: png) }
+        let sjis = dir.appendingPathComponent("メモ.txt")
+        try? "シフトJISの本文です。".data(using: .shiftJIS)?.write(to: sjis)
+        let html = dir.appendingPathComponent("page.html")
+        try? "<html><body><h1>見出し</h1><p>本文</p></body></html>".data(using: .utf8)?.write(to: html)
+        let json = dir.appendingPathComponent("data.json")
+        try? "{\"a\": 1}".data(using: .utf8)?.write(to: json)
+        let brokenPng = dir.appendingPathComponent("壊れた.png")
+        try? Data([1, 2, 3]).write(to: brokenPng)
+        let urls = [png, sjis, html, json, brokenPng, dir.appendingPathComponent("a.pdf"), dir.appendingPathComponent("b.TIF")]
+        let r = DropOpen.prepare(urls)
+        check(r.open.map(\.lastPathComponent) == ["a.pdf", "b.TIF"], "ドロップ：PDF と TIFF はそのまま開く (\(r.open.map(\.lastPathComponent)))")
+        check(r.made.map(\.1) == ["画像.pdf", "メモ.pdf", "page.pdf"] && r.made.allSatisfy { $0.0.pageCount >= 1 },
+              "ドロップ：画像・テキスト・HTML は 1 ファイルずつ PDF にする (\(r.made.map { "\($0.1)=\($0.0.pageCount)" }))")
+        check((r.made.dropFirst().first?.0.string ?? "").contains("シフトJISの本文"), "ドロップ：Shift_JIS のテキストを読める")
+        check(r.skipped.count == 2 && r.skipped[0].hasPrefix("data.json") && r.skipped[1].hasPrefix("壊れた.png"),
+              "ドロップ：開けないファイルは名前を出して知らせる (\(r.skipped))")
+    }
+
+    /// しおりの編集：並べ替え・段の上げ下げ・名前の変更・削除。どれも元に戻せ、保存して開き直しても形が残る
+    static func outlineTests() {
+        let doc = PDFDocument()
+        for i in 0..<3 { if let p = Operations.blankPage() { doc.insert(p, at: i) } }
+        let root = PDFOutline()
+        doc.outlineRoot = root
+        var marks: [PDFOutline] = []
+        for (i, name) in ["A", "B", "C"].enumerated() {
+            let o = PDFOutline()
+            o.label = name
+            o.destination = PDFDestination(page: doc.page(at: i)!, at: CGPoint(x: 0, y: 800))
+            root.insertChild(o, at: i)
+            marks.append(o)
+        }
+        let (a, b, c) = (marks[0], marks[1], marks[2])
+        let d = PDFStudioDocument.makeNew(doc, title: "outline.pdf", edited: false)
+        guard let um = d.undoManager else { check(false, "しおり：取り消しの準備"); return }
+        um.groupsByEvent = false
+        func step(_ body: () -> Void) { um.beginUndoGrouping(); body(); um.endUndoGrouping() }
+        func shape(_ o: PDFOutline? = nil) -> String {
+            let n = o ?? d.pdf.outlineRoot!
+            return (0..<n.numberOfChildren).map { i -> String in
+                let x = n.child(at: i)!
+                return (x.label ?? "?") + (x.numberOfChildren > 0 ? "(" + shape(x) + ")" : "")
+            }.joined(separator: ",")
+        }
+        var ok = true
+        var log: [String] = []
+        func expect(_ s: String) { log.append(shape()); if shape() != s { ok = false } }
+        step { OutlineEdit.move(c, by: -1, in: d) }; expect("A,C,B")
+        let edited = d.isDocumentEdited
+        step { OutlineEdit.indent(c, in: d) }; expect("A(C),B")
+        let topCantMove = !OutlineEdit.move(a, by: -1, in: d) && !OutlineEdit.indent(a, in: d) && !OutlineEdit.outdent(a, in: d)
+        step { OutlineEdit.outdent(c, in: d) }; expect("A,C,B")
+        step { OutlineEdit.indent(b, in: d) }; expect("A,C(B)")
+        step { OutlineEdit.rename(b, to: "B2", in: d) }; expect("A,C(B2)")
+        step { OutlineEdit.remove(a, in: d) }; expect("C(B2)")
+        // 保存して開き直す
+        let saved = Compositor.serialize(d.pdf).flatMap(PDFDocument.init(data:))
+        let reopened = saved.map { s in PDFStudioDocument.makeNew(s, title: "re.pdf", edited: false) }
+        var savedShape = ""
+        if let r = reopened?.pdf.outlineRoot {
+            savedShape = (0..<r.numberOfChildren).map { r.child(at: $0)!.label ?? "?" }.joined(separator: ",") + "/" + (r.child(at: 0)?.child(at: 0)?.label ?? "-")
+        }
+        let destOk = (saved?.outlineRoot?.child(at: 0)?.child(at: 0)?.destination?.page).map { saved!.index(for: $0) } == 1
+        for _ in 0..<6 { um.undo() }
+        log.append(shape())
+        let undone = shape() == "A,B,C"
+        um.redo(); um.redo()
+        let redone = shape() == "A(C),B"
+        check(ok && edited && topCantMove && undone && redone && savedShape == "C/B2" && destOk,
+              "しおり：並べ替え・段の上げ下げ・名前の変更・削除を元に戻せ、保存しても形が残る (\(log.joined(separator: " → ")), やり直し \(shape()), 保存後 \(savedShape), 移動先 \(destOk))")
     }
 
     /// 実際のマウス・キーのイベントで操作する（テンキーの拡大・縮小、手のひらの慣性スクロール）
@@ -584,8 +673,9 @@ enum SelfTest {
         NSDocumentController.shared.openDocument(withContentsOf: tiffURL, display: true) { d, _, _ in opened = d; done = true }
         for _ in 0..<100 where !done { pump(0.05) }
         let od = opened as? PDFStudioDocument
-        check(od?.pdf.pageCount == 3 && od?.fileURL == nil && od?.isDocumentEdited == true && od?.displayName == "multipage.pdf",
-              "TIFF を開くと名前のない PDF の文書になる (\(od?.pdf.pageCount ?? 0) ページ、\(od?.displayName ?? "なし")、保存先 \(od?.fileURL?.lastPathComponent ?? "なし"))")
+        // 見ただけなら変更ありにしない（閉じるときに確かめない。元の TIFF は残っている）
+        check(od?.pdf.pageCount == 3 && od?.fileURL == nil && od?.isDocumentEdited == false && od?.displayName == "multipage.pdf",
+              "TIFF を開くと名前のない PDF の文書になり、閉じるときに確かめない (\(od?.pdf.pageCount ?? 0) ページ、\(od?.displayName ?? "なし")、保存先 \(od?.fileURL?.lastPathComponent ?? "なし"))")
         od?.updateChangeCount(.changeCleared)
         od?.close()
 

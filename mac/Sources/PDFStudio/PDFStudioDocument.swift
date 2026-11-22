@@ -108,15 +108,22 @@ final class PDFStudioDocument: NSDocument {
 
     // MARK: 新規文書を開く
 
-    @discardableResult
-    static func openNew(_ doc: PDFDocument, title: String) -> PDFStudioDocument {
+    /// 名前のない新しい文書を作る（表示はしない）。edited: 変更ありにする（閉じるときに保存を確かめる）。
+    /// TIFF を変換して開いただけなら元のファイルが残っているので、変更ありにしない（編集したら変更ありになる）
+    static func makeNew(_ doc: PDFDocument, title: String, edited: Bool = true) -> PDFStudioDocument {
         let d = PDFStudioDocument()
         d.pdf = doc
         d.displayName = title
+        if edited { d.updateChangeCount(.changeDone) }
+        return d
+    }
+
+    @discardableResult
+    static func openNew(_ doc: PDFDocument, title: String, edited: Bool = true) -> PDFStudioDocument {
+        let d = makeNew(doc, title: title, edited: edited)
         NSDocumentController.shared.addDocument(d)
         d.makeWindowControllers()
         d.showWindows()
-        d.updateChangeCount(.changeDone)
         return d
     }
 }
@@ -162,7 +169,8 @@ final class PDFStudioDocumentController: NSDocumentController {
                     let s = TiffImport.lastStats
                     NSLog("tiff open: pages=%d passthrough=%d g4=%d jpeg=%d %.1fs", s.pages, s.passthrough, s.reencodedG4, s.jpeg, Date().timeIntervalSince(started))
                     self.noteNewRecentDocumentURL(url)
-                    let d = PDFStudioDocument.openNew(doc, title: url.deletingPathExtension().lastPathComponent + ".pdf")
+                    // 見ただけなら閉じるときに確かめない（元の TIFF はそのまま残っている）。「保存」で PDF にはできる
+                    let d = PDFStudioDocument.openNew(doc, title: url.deletingPathExtension().lastPathComponent + ".pdf", edited: false)
                     completionHandler(d, false, nil)
                     if s.failed > 0 { Dialog.alert("読み込めないページがありました", L("\(s.failed) ページを読み込めなかったため、除いて開きました。"), style: .warning) }
                 case .failure(let error):

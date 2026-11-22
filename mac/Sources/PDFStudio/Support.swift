@@ -6,6 +6,7 @@ extension Notification.Name {
     static let studioAnnotationsChanged = Notification.Name("PDFStudioAnnotationsChanged")
     static let studioDocumentReplaced = Notification.Name("PDFStudioDocumentReplaced")
     static let studioPagesChanged = Notification.Name("PDFStudioPagesChanged")
+    static let studioOutlineChanged = Notification.Name("PDFStudioOutlineChanged")
     static let studioSelectionChanged = Notification.Name("PDFStudioAnnotationSelectionChanged")
     static let studioToolChanged = Notification.Name("PDFStudioToolChanged")
 }

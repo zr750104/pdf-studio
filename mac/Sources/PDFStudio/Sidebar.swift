@@ -283,10 +283,23 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         let add = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "追加")!, target: self, action: #selector(addBookmark))
         let addChild = NSButton(title: "子を追加", target: self, action: #selector(addChildBookmark))
         let del = NSButton(image: NSImage(systemSymbolName: "minus", accessibilityDescription: "削除")!, target: self, action: #selector(removeBookmark))
-        for b in [add, addChild, del] { b.bezelStyle = .smallSquare; b.controlSize = .small }
+        func symbol(_ name: String, _ tip: String, _ action: Selector) -> NSButton {
+            let b = NSButton(image: NSImage(systemSymbolName: name, accessibilityDescription: tip)!, target: self, action: action)
+            b.toolTip = tip
+            return b
+        }
+        let up = symbol("arrow.up", "選択したしおりを上へ", #selector(moveUp))
+        let down = symbol("arrow.down", "選択したしおりを下へ", #selector(moveDown))
+        let outdent = symbol("arrow.left", "選択したしおりを 1 段上げる", #selector(outdentBookmark))
+        let indent = symbol("arrow.right", "選択したしおりを 1 段下げる", #selector(indentBookmark))
+        for b in [add, addChild, del, up, down, outdent, indent] { b.bezelStyle = .smallSquare; b.controlSize = .small }
         add.toolTip = "現在のページにしおりを追加"
         del.toolTip = "選択したしおりを削除"
-        let bar = NSStackView(views: [add, del, addChild])
+        NotificationCenter.default.addObserver(forName: .studioOutlineChanged, object: nil, queue: .main) { [weak self] n in
+            guard let self, let d = n.object as? PDFStudioDocument, d === self.studio else { return }
+            self.reload()
+        }
+        let bar = NSStackView(views: [add, del, addChild, up, down, outdent, indent])
         bar.orientation = .horizontal
         bar.spacing = 4
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -358,9 +371,8 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
         guard let tf = obj.object as? NSTextField else { return }
         tf.isEditable = false
         let row = outlineView.row(for: tf)
-        guard row >= 0, let o = outlineView.item(atRow: row) as? PDFOutline, o.label != tf.stringValue else { return }
-        o.label = tf.stringValue
-        studio?.updateChangeCount(.changeDone)
+        guard row >= 0, let o = outlineView.item(atRow: row) as? PDFOutline, o.label != tf.stringValue, let doc = studio else { return }
+        OutlineEdit.rename(o, to: tf.stringValue, in: doc)
     }
 
     private func newBookmark() -> PDFOutline? {
@@ -376,26 +388,42 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
     @objc private func addBookmark() {
         guard let doc = studio?.pdf, let o = newBookmark() else { return }
         if doc.outlineRoot == nil { doc.outlineRoot = PDFOutline() }
-        guard let root = doc.outlineRoot else { return }
-        root.insertChild(o, at: root.numberOfChildren)
-        studio?.updateChangeCount(.changeDone)
+        guard let root = doc.outlineRoot, let studio else { return }
+        OutlineEdit.insert(o, into: root, at: root.numberOfChildren, in: studio)
         reload()
+        select(o)
     }
 
     @objc private func addChildBookmark() {
         guard let parent = outlineView.item(atRow: outlineView.selectedRow) as? PDFOutline else { addBookmark(); return }
-        guard let o = newBookmark() else { return }
-        parent.insertChild(o, at: parent.numberOfChildren)
-        studio?.updateChangeCount(.changeDone)
+        guard let o = newBookmark(), let studio else { return }
+        OutlineEdit.insert(o, into: parent, at: parent.numberOfChildren, in: studio)
         reload()
+        select(o)
+    }
+
+    private var selected: PDFOutline? { outlineView.item(atRow: outlineView.selectedRow) as? PDFOutline }
+
+    private func select(_ o: PDFOutline) {
+        let row = outlineView.row(forItem: o)
+        if row >= 0 { outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false); outlineView.scrollRowToVisible(row) }
     }
 
     @objc private func removeBookmark() {
-        guard let o = outlineView.item(atRow: outlineView.selectedRow) as? PDFOutline else { return }
-        o.removeFromParent()
-        studio?.updateChangeCount(.changeDone)
+        guard let o = selected, let studio else { return }
+        OutlineEdit.remove(o, in: studio)
         reload()
     }
+
+    /// 並べ替え・段の上げ下げ。動かしたしおりを選んだままにする（続けて動かせるように）
+    private func relocate(_ op: (PDFOutline, PDFStudioDocument) -> Bool) {
+        guard let o = selected, let studio else { NSSound.beep(); return }
+        if op(o, studio) { reload(); select(o) } else { NSSound.beep() }
+    }
+    @objc private func moveUp() { relocate { OutlineEdit.move($0, by: -1, in: $1) } }
+    @objc private func moveDown() { relocate { OutlineEdit.move($0, by: 1, in: $1) } }
+    @objc private func indentBookmark() { relocate { OutlineEdit.indent($0, in: $1) } }
+    @objc private func outdentBookmark() { relocate { OutlineEdit.outdent($0, in: $1) } }
 }
 
 // MARK: - 注釈一覧
