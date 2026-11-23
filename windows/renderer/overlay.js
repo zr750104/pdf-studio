@@ -54,13 +54,14 @@ function score(pts, b, bw, bh, dx, dy) {
 /**
  * 新しい版（b）を何画素ずらすと古い版（a）にいちばん重なるかを探す（平行移動のみ）。
  * 粗い画像で広く探し、細かい画像で詰める。maxFrac：探す範囲（画像の大きい辺に対する割合）
- * 戻り値：{ dx, dy }（b の画素を a の画素の位置へ置くときのずれ。a[x, y] ↔ b[x - dx, y - dy]）
+ * 戻り値：{ dx, dy, fx, fy }（b の画素を a の画素の位置へ置くときのずれ。a[x, y] ↔ b[x - dx, y - dy]。
+ * fx / fy：1 画素より細かい残り（-0.5〜0.5。画像で重ねるときは使わない）
  */
 export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
   const maxDim = Math.max(aw, ah, bw, bh);
   // 粗い順に：大きい辺が約 200・約 1000 画素、そして実寸
   const levels = [...new Set([Math.ceil(maxDim / 200), Math.ceil(maxDim / 1000), 1])].sort((x, y) => y - x);
-  let dx = 0, dy = 0, prevF = null;
+  let dx = 0, dy = 0, prevF = null, fx = 0, fy = 0;
   for (const f of levels) {
     const A = f > 1 ? shrink(a, aw, ah, f) : { mask: a, w: aw, h: ah };
     const B = f > 1 ? shrink(b, bw, bh, f) : { mask: b, w: bw, h: bh };
@@ -80,8 +81,14 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
     dx = bx * f;
     dy = by * f;
     prevF = f;
+    if (f === 1) {
+      // 1 画素より細かいずれ：重なりの点数の山を、前後の点数で放物線に当てはめて頂点を推定する（線のまま重ねるときに使う）
+      const vertex = (m, c, p) => { const den = m - 2 * c + p; return den < 0 ? Math.max(-0.5, Math.min(0.5, (m - p) / (2 * den))) : 0; };
+      fx = vertex(score(pts, B.mask, B.w, B.h, bx - 1, by), best, score(pts, B.mask, B.w, B.h, bx + 1, by));
+      fy = vertex(score(pts, B.mask, B.w, B.h, bx, by - 1), best, score(pts, B.mask, B.w, B.h, bx, by + 1));
+    }
   }
-  return { dx, dy };
+  return { dx, dy, fx, fy };
 }
 
 /** r 画素ぶん太らせる（四角い範囲の最大値。横と縦に分けて速く） */
@@ -122,12 +129,13 @@ export const COLORS = { both: [90, 90, 90], removed: [220, 30, 30], added: [20, 
 
 /**
  * 重ねた画像を作る。a：古い版の線、b：新しい版の線（ずれを合わせて a と同じ大きさにしたもの）。
- * tol：この画素数以内に相手の線があれば共通とみなす。戻り値：{ image: ImageData, removed, added, total }
+ * tol：この画素数以内に相手の線があれば共通とみなす。戻り値：{ image: ImageData | null, removed, added, total }
  */
-export function compose(a, b, w, h, tol = 2) {
+export function compose(a, b, w, h, tol = 2, { image = true } = {}) {
   const da = dilate(a, w, h, tol), db = dilate(b, w, h, tol);
-  const img = new ImageData(w, h);
-  const d = img.data;
+  // image=false：画像は作らず、違いの数だけを数える（線のまま重ねるときは画像を使わない）
+  const img = image ? new ImageData(w, h) : null;
+  const d = img ? img.data : null;
   let removed = 0, added = 0, total = 0;
   for (let i = 0, p = 0; i < a.length; i++, p += 4) {
     let c = null;
@@ -135,8 +143,36 @@ export function compose(a, b, w, h, tol = 2) {
     else if (b[i] && !da[i]) { c = COLORS.added; added++; }
     else if (a[i] || b[i]) c = COLORS.both;
     if (a[i] || b[i]) total++;
+    if (!d) continue;
     if (c) { d[p] = c[0]; d[p + 1] = c[1]; d[p + 2] = c[2]; } else { d[p] = d[p + 1] = d[p + 2] = 255; }
     d[p + 3] = 255;
   }
   return { image: img, removed, added, total };
+}
+
+/**
+ * 位置合わせと色分け（重い計算）をまとめて行う。ワーカーでも画面のスレッドでも同じものを使う。
+ * 戻り値：{ dx, dy, removed, added, total, pixels: Uint8ClampedArray | null }
+ */
+export function analyze({ a, w, h, b, bw, bh, image }) {
+  const { dx, dy, fx, fy } = findShift(a, w, h, b, bw, bh);
+  const placed = placeShifted(b, bw, bh, w, h, dx, dy);
+  const r = compose(a, placed, w, h, 2, { image });
+  return { dx, dy, fx, fy, removed: r.removed, added: r.added, total: r.total, pixels: r.image ? r.image.data : null };
+}
+
+/** RGBA の画素を RGB にして、Flate（zlib）で圧縮する（PDF の画像にそのまま使える） */
+export async function deflateRGB(pixels) {
+  const n = pixels.length / 4;
+  const rgb = new Uint8Array(n * 3);
+  for (let i = 0, p = 0, q = 0; i < n; i++, p += 4, q += 3) { rgb[q] = pixels[p]; rgb[q + 1] = pixels[p + 1]; rgb[q + 2] = pixels[p + 2]; }
+  const stream = new Blob([rgb]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** analyze に加えて、色分けした画像を圧縮するところまで行う。戻り値：{ dx, dy, removed, added, total, rgbz: Uint8Array | null } */
+export async function analyzeFull(job) {
+  const r = analyze(job);
+  const rgbz = r.pixels ? await deflateRGB(r.pixels) : null;
+  return { dx: r.dx, dy: r.dy, fx: r.fx, fy: r.fy, removed: r.removed, added: r.added, total: r.total, rgbz };
 }

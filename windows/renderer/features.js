@@ -12,7 +12,7 @@ import { isTiff, addTiffPages, lastStats as tiffStats } from './tiff.js';
 import { scanInfo, scanAvailable, renderScan, drawScan } from './scanpages.js';
 import { t } from './i18n.js';
 import { sniffKind, embedImage } from './sources.js';
-import { darkMask, findShift, placeShifted, compose } from './overlay.js';
+import { darkMask, analyzeFull as analyzeOverlayFull } from './overlay.js';
 export { sniffKind } from './sources.js';
 
 const { PDFDocument, rgb, degrees } = PL;
@@ -1067,8 +1067,10 @@ export async function normalizeSizeDialog() {
 
 // ---------------------------------------------------------------- 図面の重ね合わせ比較
 
-/** 比較相手のファイルを pdf.js で開く（TIFF は PDF に変換してから。パスワードは聞く） */
-async function openOtherForCompare(file) {
+/** 比較相手のファイルを pdf.js で開く（TIFF は PDF に変換してから。パスワードは聞く）。
+ *  戻り値：{ pdf, data（PDF の中身）, password } または null（パスワードを聞いてやめた）。
+ *  onAsk：パスワードを聞く前後に呼ぶ（進み具合の窓を閉じて、聞いたあとに開き直すため） */
+async function openOtherForCompare(file, onAsk = null) {
   let data = new Uint8Array(file.bytes);
   if (isTiff(file.name) || sniffKind(file.name, data) === 'tiff') {
     const doc = await PDFDocument.create();
@@ -1076,17 +1078,19 @@ async function openOtherForCompare(file) {
     data = await doc.save();
   }
   try {
-    return await pdfjsLib.getDocument({ data: data.slice(), ...PDFJS_OPTS }).promise;
+    return { pdf: await pdfjsLib.getDocument({ data: data.slice(), ...PDFJS_OPTS }).promise, data, password: null };
   } catch (e) {
     if (e?.name !== 'PasswordException') throw e;
+    onAsk?.(true);
     const pw = await askPassword(`${file.name} はパスワードで保護されています。`);
+    onAsk?.(false);
     if (pw == null) return null;
-    return pdfjsLib.getDocument({ data: data.slice(), password: pw, ...PDFJS_OPTS }).promise;
+    return { pdf: await pdfjsLib.getDocument({ data: data.slice(), password: pw, ...PDFJS_OPTS }).promise, data, password: pw };
   }
 }
 
-/** pdf.js のページを、1pt あたり s 画素で描いた画像にする（白い背景） */
-async function renderForCompare(page, s) {
+/** pdf.js のページを、1pt あたり s 画素で描いた画像にする（白い背景）。annotations=false なら注釈を描かない */
+async function renderForCompare(page, s, annotations = true) {
   const vp = page.getViewport({ scale: s });
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(vp.width));
@@ -1094,43 +1098,206 @@ async function renderForCompare(page, s) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, c.width, c.height);
-  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  await page.render({ canvasContext: ctx, viewport: vp, annotationMode: annotations ? pdfjsLib.AnnotationMode.ENABLE : pdfjsLib.AnnotationMode.DISABLE }).promise;
   const img = ctx.getImageData(0, 0, c.width, c.height);
   c.width = 0;
   return img;
 }
 
+// 位置合わせ・色分け・画像の圧縮の重い計算は、ワーカー（overlay-worker.js）で行う（計算の間も画面と「中止」が動くように）。
+// ワーカーが使えないときは画面のスレッドで行う。中止したらワーカーを止め、次に使うときに作り直す
+let overlayWorker = null, overlayWorkerBroken = false, overlayJobId = 0, overlayWorkerJobs = 0;
+const overlayWaiting = new Map();
+function getOverlayWorker() {
+  if (overlayWorker || overlayWorkerBroken) return overlayWorker;
+  try {
+    const w = new Worker(new URL('./overlay-worker.js', import.meta.url), { type: 'module' });
+    w.onmessage = (e) => {
+      const { id, r, error } = e.data;
+      const p = overlayWaiting.get(id);
+      overlayWaiting.delete(id);
+      if (!p) return;
+      if (error) p.reject(new Error(error)); else { overlayWorkerJobs++; p.resolve(r); }
+    };
+    // 読み込めなかった・落ちた・返事を受け取れなかった：待っているものは画面のスレッドでやり直す
+    const broken = (e) => {
+      overlayWorkerBroken = true;
+      if (overlayWorker === w) overlayWorker = null;
+      for (const p of overlayWaiting.values()) p.fallback();
+      overlayWaiting.clear();
+      e?.preventDefault?.();
+    };
+    w.onerror = broken;
+    w.onmessageerror = broken;
+    overlayWorker = w;
+  } catch {
+    overlayWorkerBroken = true;
+    overlayWorker = null;
+  }
+  return overlayWorker;
+}
+/** 中止：計算中のワーカーを止める（待っているものは中止で終える）。次に使うときに作り直す */
+function abortOverlayWorker() {
+  if (!overlayWaiting.size || !overlayWorker) return;
+  overlayWorker.terminate();
+  overlayWorker = null;
+  for (const p of overlayWaiting.values()) p.reject(new Error('CANCELLED'));
+  overlayWaiting.clear();
+}
+/** ワーカーで計算できたか（自動テスト用） */
+export const overlayWorkerOk = () => overlayWorkerJobs > 0;
+function runAnalyze(job) {
+  const inline = () => analyzeOverlayFull(job);
+  const w = window.__overlayInline ? null : getOverlayWorker();
+  if (!w) return inline();
+  return new Promise((resolve, reject) => {
+    const id = ++overlayJobId;
+    overlayWaiting.set(id, { resolve, reject, fallback: () => inline().then(resolve, reject) });
+    // 配列は写して送る（ワーカーが読み込めなかったときに、画面のスレッドでやり直せるように）
+    w.postMessage({ id, job });
+  });
+}
+
+/** 画面を描き直す機会を作る（進み具合の文言・バーを出すため） */
+const nextFrame = () => new Promise((r) => { let done = false; const go = () => { if (!done) { done = true; setTimeout(r, 0); } }; requestAnimationFrame(go); setTimeout(go, 20); });
+
 /**
- * 古い版（今の文書）と新しい版の 1 ページを重ねた画像（PNG）と、変わった量を返す。
- * renderA：古い版のページを描く関数（今の文書のスキャン画像のページは、速い描き方で描けるように）
+ * 古い版（今の文書）と新しい版の 1 ページを比べ、ずれと変わった量を返す。
+ * image=true なら色分けした画像も作る（rgbz：RGB の画素を Flate で圧縮したもの。imgW × imgH）。
+ * renderA(s, annotations)：古い版のページを描く関数（今の文書のスキャン画像のページは、速い描き方で描けるように）。
+ * annotations=false：注釈を描かずに比べる（線のまま重ねるときは注釈を写さないので、数も合わせる）。
+ * onStage(割合 0〜1, 段階)：進み具合
  */
-export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, renderA = null } = {}) {
+export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, renderA = null, image = true, annotations = true, onStage = null } = {}) {
   const va = pageA.getViewport({ scale: 1 }), vb = pageB.getViewport({ scale: 1 });
   // 同じ実寸の縮尺で描く（画素の大きさではそろえない）。大きい方のページが上限に収まるように
   const s = Math.min(dpi / 72, Math.sqrt(maxPixels / Math.max(va.width * va.height, vb.width * vb.height)));
+  await onStage?.(0, '古い版を描いています');
   // 線だけを取り出したら、画素はすぐ手放す（大きな図面でメモリを使いすぎないように）
-  let img = renderA ? await renderA(s) : await renderForCompare(pageA, s);
+  let img = renderA ? await renderA(s, annotations) : await renderForCompare(pageA, s, annotations);
   const w = img.width, h = img.height;
   const a = darkMask(img);
-  img = await renderForCompare(pageB, s);
+  await onStage?.(0.3, '新しい版を描いています');
+  img = await renderForCompare(pageB, s, annotations);
   const bw = img.width, bh = img.height;
   const b = darkMask(img);
   img = null;
   pageB.cleanup();
-  const { dx, dy } = findShift(a, w, h, b, bw, bh);
-  const bPlaced = placeShifted(b, bw, bh, w, h, dx, dy);
-  const r = compose(a, bPlaced, w, h, 2);
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  c.getContext('2d').putImageData(r.image, 0, 0);
-  const png = await canvasToBytes(c, 'image/png');
-  c.width = 0;
+  await onStage?.(0.55, image ? '位置を合わせ、違いを調べ、色分けした画像を作っています' : '位置を合わせ、違いを調べています');
+  const r = await runAnalyze({ a, w, h, b, bw, bh, image });
+  const { dx, dy } = r;
   const sizeDiffers = Math.abs(va.width - vb.width) > Math.max(2, va.width * 0.01) || Math.abs(va.height - vb.height) > Math.max(2, va.height * 0.01);
   // ずれは mm で（1pt = 25.4/72 mm）
   const mm = (px) => Math.round((px / s) * (25.4 / 72) * 10) / 10;
-  return { png, widthPt: va.width, heightPt: va.height, removed: r.removed, added: r.added, total: r.total, shiftMm: [mm(dx), mm(dy)], shiftPx: [dx, dy], sizeDiffers };
+  return { rgbz: r.rgbz || null, imgW: w, imgH: h, widthPt: va.width, heightPt: va.height, removed: r.removed, added: r.added, total: r.total, shiftMm: [mm(dx), mm(dy)], shiftPx: [dx, dy], shiftPt: [(dx + (r.fx || 0)) / s, (dy + (r.fy || 0)) / s], sizeDiffers };
 }
+
+/** スキャン画像のページか（画像があり、線を描く命令がほとんどない）。OCR の見えない文字はあってもよい。注釈は数えない */
+async function isScanPage(page) {
+  const O = pdfjsLib.OPS;
+  const imageOps = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject, O.paintImageXObjectRepeat, O.paintImageMaskXObjectRepeat, O.paintImageMaskXObjectGroup, O.paintInlineImageXObjectGroup, O.paintSolidColorImageMask].filter((x) => x != null));
+  const { fnArray } = await page.getOperatorList({ annotationMode: pdfjsLib.AnnotationMode.DISABLE });
+  let images = 0, paths = 0;
+  for (const fn of fnArray) { if (imageOps.has(fn)) images++; else if (fn === O.constructPath) paths++; }
+  return images > 0 && paths <= 8;
+}
+
+/** リンク・ポップアップ以外の注釈（スタンプ・雲マーク・付箋・フォームの欄など）があるか。あるページは画像で重ねる（注釈も比べるため） */
+async function hasMarkup(page) {
+  const list = await page.getAnnotations();
+  return list.some((a) => !['Link', 'Popup'].includes(a.subtype));
+}
+
+// 線のまま重ねるときの色（共通の線は赤と青を掛け合わせた黒になる）
+const VEC_RED = [0.86, 0.12, 0.12], VEC_BLUE = [0.08, 0.35, 0.92];
+const n4 = (v) => (Math.abs(v) < 1e-9 ? '0' : (+v.toFixed(4)).toString());
+
+/** pdf-lib のページの中身（Contents。いくつかに分かれていてもつなぐ）を展開したバイト列にする。中身がなければ空 */
+function pageContentBytes(page) {
+  const { PDFArray, PDFRawStream, decodePDFRawStream } = PL;
+  const c = page.node.Contents();
+  const list = !c ? [] : c instanceof PDFArray ? c.asArray().map((x) => page.doc.context.lookup(x)) : [c];
+  const parts = list.filter(Boolean).map((s) => (s instanceof PDFRawStream ? decodePDFRawStream(s).decode() : (s.getUnencodedContents?.() || s.getContents())));
+  const total = parts.reduce((n, p) => n + p.length + 1, 0);
+  const out = new Uint8Array(total);
+  let k = 0;
+  for (const p of parts) { out.set(p, k); k += p.length; out[k++] = 0x0a; } // 分かれ目は改行（命令の途中で切れないように）
+  return out;
+}
+
+/**
+ * ページの中身を部品（Form XObject）にする。写すのは中身と素材（Resources）だけ（注釈・リンク先のページなどは写さない）。
+ * 部品の座標はページの座標のまま。copier：文書ごとに 1 つ（同じフォント・画像を何度も写さない）
+ */
+function pagePart(out, copier, page, bytes) {
+  const { PDFName } = PL;
+  const res = page.node.Resources() || page.node.getInheritableAttribute?.(PDFName.of('Resources'));
+  const resDict = res ? page.doc.context.lookup(res) : null;
+  const c = page.getCropBox();
+  const dict = { Type: 'XObject', Subtype: 'Form', BBox: [c.x, c.y, c.x + c.width, c.y + c.height] };
+  const stream = out.context.flateStream(bytes, dict);
+  if (resDict) stream.dict.set(PDFName.of('Resources'), copier.copy(resDict));
+  return out.context.register(stream);
+}
+
+/**
+ * 線のまま重ねたページを作る（拡大しても鮮明）。古い版を赤、新しい版を青に染めた部品を、掛け合わせて重ねる：
+ * 古い版だけ＝赤、新しい版だけ＝青、共通＝黒、何もない所＝白。
+ * 染め方：色で塗った上に白を、「白地に置いたページの明るさ」をマスク（ソフトマスク）にして塗る。線の所は色、何もない所は白になる。
+ * ページの中身が自分で合成の仕方を決めていても、マスクの中に閉じているので色が崩れない。
+ * partA / partB：pagePart の部品、vpA / vpB：pdf.js の 1 倍の表示範囲（回転・切り抜きを含む）、shiftPt：新しい版を動かす量（下向きが正）
+ */
+function vectorOverlayPage(out, partA, vpA, partB, vpB, shiftPt) {
+  const { PDFName } = PL;
+  const ctx = out.context;
+  const W = vpA.width, H = vpA.height;
+  const box = `0 0 ${n4(W)} ${n4(H)} re f`;
+  const rgbGroup = (extra = {}) => ({ Type: 'Group', S: 'Transparency', CS: 'DeviceRGB', ...extra });
+  // マスクの中で、ページの上に 0.4 の灰色を「焼き込み（ColorBurn）」で重ねる：値 v が (v − 0.6) ÷ 0.4 になり（0 未満は 0）、
+  // 0.6 より暗い色（線として数える色。緑や水色の線も）ははっきり色が出て、明るい所は白のまま。
+  // 線かどうかの判定（darkMask：明るさ 160/255 未満）と見た目をそろえる。（マスクの変換関数 /TR は pdf.js で正しく効かないため使わない）
+  const burn = ctx.register(ctx.obj({ Type: 'ExtGState', BM: 'ColorBurn' }));
+  // pdf.js の変換（下向きの y）を、PDF の座標（上向きの y）に直す
+  const mat = (vp, sx = 0, sy = 0) => { const [a, b, c, d, e, f] = vp.transform; return [a, -b, c, -d, e + sx, H - f - sy]; };
+  const tinted = (part, m, color) => {
+    // マスク：白地にページを置いた明るさ（線＝暗い＝色が出る、何もない所＝明るい＝白が出る）
+    const mask = ctx.register(ctx.stream(`q 1 1 1 rg ${box} Q q ${m.map(n4).join(' ')} cm /P Do Q q /B gs 0.4 0.4 0.4 rg ${box} Q`, {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, W, H], Group: rgbGroup(), Resources: { XObject: { P: part }, ExtGState: { B: burn } }
+    }));
+    const sm = ctx.register(ctx.obj({ Type: 'ExtGState', SMask: { Type: 'Mask', S: 'Luminosity', G: mask } }));
+    return ctx.register(ctx.stream(`q ${color.map(n4).join(' ')} rg ${box} Q q /M gs 1 1 1 rg ${box} Q`, {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, W, H], Group: rgbGroup({ I: true }), Resources: { ExtGState: { M: sm } }
+    }));
+  };
+  const ga = tinted(partA, mat(vpA), VEC_RED);
+  const gb = tinted(partB, mat(vpB, shiftPt[0], shiftPt[1]), VEC_BLUE);
+  const mul = ctx.register(ctx.obj({ Type: 'ExtGState', BM: 'Multiply' }));
+  const page = out.addPage([W, H]);
+  // 掛け合わせる色の空間を RGB に決めておく（ソフトの設定で色が変わらないように）
+  page.node.set(PDFName.of('Group'), ctx.obj(rgbGroup()));
+  page.node.setXObject(PDFName.of('StudioGA'), ga);
+  page.node.setXObject(PDFName.of('StudioGB'), gb);
+  page.node.setExtGState(PDFName.of('StudioMul'), mul);
+  page.pushOperators(
+    PL.pushGraphicsState(), PL.drawObject('StudioGA'), PL.popGraphicsState(),
+    PL.pushGraphicsState(), PL.setGraphicsState('StudioMul'), PL.drawObject('StudioGB'), PL.popGraphicsState()
+  );
+  return page;
+}
+
+/** 色分けした画像（圧縮済みの RGB）を、ページいっぱいに置いたページを作る */
+function rasterOverlayPage(out, r) {
+  const { PDFName } = PL;
+  const ctx = out.context;
+  const img = ctx.register(ctx.stream(r.rgbz, { Type: 'XObject', Subtype: 'Image', Width: r.imgW, Height: r.imgH, ColorSpace: 'DeviceRGB', BitsPerComponent: 8, Filter: 'FlateDecode' }));
+  const page = out.addPage([r.widthPt, r.heightPt]);
+  page.node.setXObject(PDFName.of('StudioImg'), img);
+  page.pushOperators(PL.pushGraphicsState(), PL.concatTransformationMatrix(r.widthPt, 0, 0, r.heightPt, 0, 0), PL.drawObject('StudioImg'), PL.popGraphicsState());
+  return page;
+}
+
+/** 文書に画層（オプションコンテンツ）があるか。あると、隠した画層まで写ってしまうので画像で重ねる */
+const hasLayers = (lib) => !!lib.catalog.get(PL.PDFName.of('OCProperties'));
 
 /** 今の文書（古い版）と、選んだファイル（新しい版）のページを重ねて、違いを色分けした PDF を新しいタブに作る */
 export async function compareOverlay({ files = null } = {}) {
@@ -1138,36 +1305,94 @@ export async function compareOverlay({ files = null } = {}) {
   if (!requireDoc() || !allowed('copy')) return;
   files = files || await window.api.openDialog({ title: '重ねて比較する（新しい版の）ファイル', filters: [{ name: 'PDF / TIFF', extensions: ['pdf', 'tif', 'tiff'] }] });
   if (!files.length) return;
-  let other;
+  // 進み具合の窓は、相手のファイルを開く（TIFF の変換を含む）ところから、結果を書き出し終わるまで出す
+  const title = '重ねて比較しています';
+  let pr = progress(title, 1);
+  pr.status(0, t('比較するファイルを開いています'));
+  await nextFrame();
+  let opened, cancelledBeforeAsk = false;
   try {
-    other = await openOtherForCompare(files[0]);
+    opened = await openOtherForCompare(files[0], (asking) => {
+      // パスワードを聞く間は進み具合の窓を閉じ、聞いたあとに開き直す（その前に押した「中止」は覚えておく）
+      if (asking) { cancelledBeforeAsk = pr.cancelled; pr.close(); } else { pr = progress(title, 1); pr.status(0, t('比較するファイルを開いています')); }
+    });
   } catch (e) {
+    pr.close();
     return alertBox('比較するファイルを開けませんでした', e.message);
   }
-  if (!other) return;
+  // 開いている間に「中止」を押したら、ここでやめる
+  const cancelledEarly = pr.cancelled || cancelledBeforeAsk;
+  pr.close();
+  if (!opened) return;
+  if (cancelledEarly) { opened.pdf.destroy(); return; }
+  const other = opened.pdf;
   const n = Math.min(state.pdf.numPages, other.numPages);
-  const pr = progress('重ねて比較しています', n);
+  pr = progress(title, n);
+  // 計算中に「中止」を押したら、ワーカーの計算も止める
+  const watch = setInterval(() => { if (pr.cancelled) abortOverlayWorker(); }, 200);
   const notes = [];
-  let changedPages = 0;
-  let out;
+  let changedPages = 0, vectorPages = 0;
+  let bytes;
   try {
-    out = await PDFDocument.create();
+    const out = await PDFDocument.create();
     // 凡例の文字：表示言語の文字が入ったフォント（タイ語ならタイ語のフォント）
     const font = await textFont(out, t('赤：古い版だけにある線'));
+    // 線のまま重ねるための、両方の版の pdf-lib の文書（読めなければ画像で重ねる）
+    let libA = state.lib && state.libFor === state.pdf ? state.lib : null;
+    let libB = null;
+    if (libA) {
+      // パスワードは開いたときのものを 1 回だけ渡す（読めなければ画像で重ねる。聞き直さない）
+      let given = false;
+      try { libB = (await loadLib(opened.data.slice(), async () => { if (given) return null; given = true; return opened.password; })).lib; } catch { libB = null; }
+    }
+    // 画層のある文書は、隠した画層まで写ってしまうので画像で重ねる
+    if (libA && libB && (hasLayers(libA) || hasLayers(libB))) { libA = null; libB = null; }
+    // 素材（フォント・画像）を写す道具は、文書ごとに 1 つ（同じものを何度も写さない）
+    const copierA = libA && libB ? PL.PDFObjectCopier.for(libA.context, out.context) : null;
+    const copierB = libA && libB ? PL.PDFObjectCopier.for(libB.context, out.context) : null;
+    const stageText = (i, k) => t('{p}：{s}').replace('{p}', t('ページ {i} / {n}').replace('{i}', i + 1).replace('{n}', n)).replace('{s}', t(k));
     for (let i = 0; i < n; i++) {
       if (pr.cancelled) throw new Error('CANCELLED');
-      pr.update(i);
+      const onStage = async (frac, k) => {
+        if (pr.cancelled) throw new Error('CANCELLED');
+        pr.status(i + frac, stageText(i, k));
+        await nextFrame();
+      };
+      await onStage(0, '図面の種類を調べています');
+      const pa = await state.pdf.getPage(i + 1), pb = await other.getPage(i + 1);
+      // CAD などの線の図面は線のまま重ねる（拡大しても鮮明）。次のページは画像で重ねる：
+      // スキャン画像（細かな汚れを違いにしないよう 2 画素の許容がある）・注釈のあるページ（注釈も比べる）・pdf-lib でそのページを読めないとき
+      let parts = null;
+      try {
+        if (copierA && i < libA.getPageCount() && i < libB.getPageCount() &&
+            !(await isScanPage(pa)) && !(await isScanPage(pb)) && !(await hasMarkup(pa)) && !(await hasMarkup(pb))) {
+          // 両方の中身を先に展開する（展開できないページは、出力に何も足す前に画像で重ねる方に切り替わる）
+          const pgA = libA.getPage(i), pgB = libB.getPage(i);
+          const bytesA = pageContentBytes(pgA), bytesB = pageContentBytes(pgB);
+          parts = [pagePart(out, copierA, pgA, bytesA), pagePart(out, copierB, pgB, bytesB)];
+        }
+      } catch (e) {
+        if (e?.message === 'CANCELLED') throw e;
+        window.api?.logInfo?.(`overlay: page ${i + 1} falls back to image (${e?.message || e})`);
+        parts = null;
+      }
+      const vector = !!parts;
       // 古い版（今の文書）は、スキャン画像のページなら速い描き方で描く
-      const renderA = async (s) => {
-        const { canvas } = await renderToCanvas(state.pdf, i, s * 72);
+      const renderA = async (s, annotations) => {
+        const { canvas } = await renderToCanvas(state.pdf, i, s * 72, { annotations });
         const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
         canvas.width = 0;
         return data;
       };
-      const r = await overlayPages(await state.pdf.getPage(i + 1), await other.getPage(i + 1), { renderA });
-      const img = await out.embedPng(r.png);
-      const page = out.addPage([r.widthPt, r.heightPt]);
-      page.drawImage(img, { x: 0, y: 0, width: r.widthPt, height: r.heightPt });
+      // 線のまま重ねるときの画像は、ずれと違いの量を調べるためだけに使う（注釈は写さないので描かない）。
+      // 画像で重ねるときは細かく描く（元のスキャンの細かさに近づける）
+      const r = await overlayPages(pa, pb, { renderA, image: !vector, annotations: !vector, maxPixels: vector ? 12e6 : 30e6, onStage });
+      let page;
+      if (vector) {
+        await onStage(0.9, '線のまま重ねたページを作っています');
+        page = vectorOverlayPage(out, parts[0], pa.getViewport({ scale: 1 }), parts[1], pb.getViewport({ scale: 1 }), r.shiftPt);
+        vectorPages++;
+      } else page = rasterOverlayPage(out, r);
       // 変わった画素が線全体の 0.05% 以下なら「違いなし」とみなす（細かなにじみを数えない）
       const changed = r.removed + r.added > Math.max(20, r.total * 0.0005);
       if (changed) changedPages++;
@@ -1177,7 +1402,7 @@ export async function compareOverlay({ files = null } = {}) {
       const lines = [
         [t('赤：古い版だけにある線'), PL.rgb(0.86, 0.12, 0.12)],
         [t('青：新しい版だけにある線'), PL.rgb(0.08, 0.35, 0.92)],
-        [t('灰：共通の線'), PL.rgb(0.35, 0.35, 0.35)],
+        [vector ? t('黒：共通の線') : t('灰：共通の線'), PL.rgb(0.25, 0.25, 0.25)],
         [`${t('位置のずれを補正')}: ${r.shiftMm[0]} mm, ${r.shiftMm[1]} mm`, PL.rgb(0.2, 0.2, 0.2)]
       ];
       const boxW = Math.max(...lines.map(([s2]) => font.widthOfTextAtSize(s2, size))) + size * 1.2;
@@ -1185,16 +1410,20 @@ export async function compareOverlay({ files = null } = {}) {
       page.drawRectangle({ x: size * 0.6, y: r.heightPt - boxH - size * 0.6, width: boxW, height: boxH, color: PL.rgb(1, 1, 1), opacity: 0.9, borderColor: PL.rgb(0.6, 0.6, 0.6), borderWidth: 0.5 });
       lines.forEach(([s2, color], k) => page.drawText(s2, { x: size * 1.2, y: r.heightPt - size * 0.6 - size * 1.4 * (k + 1), size, font, color }));
     }
-    pr.update(n);
+    pr.status(n, t('結果のファイルを書き出しています'));
+    await nextFrame();
+    bytes = await out.save();
   } catch (e) {
     if (e?.message === 'CANCELLED') return;
     return alertBox('重ねて比較できませんでした', e.message);
   } finally {
+    clearInterval(watch);
     pr.close();
     other.destroy();
   }
   if (state.pdf.numPages !== other.numPages) notes.push(t('ページ数が違います（{a} / {b}）。先頭から {n} ページだけを比べました').replace('{a}', state.pdf.numPages).replace('{b}', other.numPages).replace('{n}', n));
-  const bytes = await out.save();
+  if (vectorPages < n) notes.push(t('{n} ページは画像で重ねました（スキャン画像、画層や注釈のある図面など。拡大すると粗く見えます）').replace('{n}', n - vectorPages));
+  window.__lastOverlay = { pages: n, vectorPages, changedPages, bytes: window.__keepOverlay ? bytes : undefined }; // bytes は自動テストのときだけ
   await alertBox(t('重ねて比較しました'), `${t('{n} ページのうち {c} ページに違いがあります').replace('{n}', n).replace('{c}', changedPages)}${notes.length ? `\n\n${notes.join('\n')}` : ''}\n\n${t('回転や拡大縮小の違いは補正しません')}`);
   await openResult(bytes, `${baseName(state.name)}_${t('重ねて比較')}.pdf`);
 }

@@ -40,6 +40,15 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.29 の変更点
+
+- 重ねて比較（features.js compareOverlay）：線の図面のページは、画像にせず線のまま重ねる（vectorOverlayPage）。両方の版のページの中身（Contents を展開してつなぐ）と素材（Resources。文書ごとに 1 つの PDFObjectCopier で写す）だけで部品（Form XObject、座標はページのまま、BBox は CropBox）を作る（pagePart。注釈・リンク先のページは写さない。中身のないページは空の部品）。pdf.js の 1 倍の表示範囲の変換を上向きの y に直した行列で置き（回転・切り抜きもこれで合う）、新しい版はずれ（shiftPt）だけ動かす。染め方は、色で塗った上に白を「白地＋ページ」の明るさのソフトマスク（/S /Luminosity）付きで塗る（中身が合成の仕方を決めていても崩れない）。2 つを Multiply で重ね、古い版だけ＝赤、新しい版だけ＝青、共通＝黒。ページに /Group /CS /DeviceRGB を付ける
+- 次のページはこれまでどおり画像で重ねる：スキャン画像（isScanPage：注釈を除いた命令に画像があり、線の命令が 8 個以下）・リンク／フォーム／ポップアップ以外の注釈がある・文書に画層（/OCProperties）がある・pdf-lib で読めない／中身を展開できない。画像は 30MP まで（以前は 12MP）。線のまま重ねるときも、ずれと違いの量は 12MP の画像（注釈なし）で調べる
+- 位置合わせ・色分け・画像の圧縮（RGB を CompressionStream で deflate し、FlateDecode の画像として直接置く。embedPng を使わない）はワーカー（renderer/overlay-worker.js、overlay.js の analyzeFull）で行う。使えなければ画面のスレッドで行う。中止したらワーカーを止め（terminate）、次に作り直す
+- 進み具合の窓は、相手のファイルを開くところから書き出し終わるまで出し、ページの中の段階を文言で出す（util.js progress の status。訳した文を出すので translate="no"）
+- 起動時に前回のファイルを開くかを聞く（main.js askRestore）。「開かない」（Esc も）は前回の記録を残し、ファイルのあるタブができるまで上書きしない（keepDeclinedSession）。聞いている間の二重起動で渡されたファイルはためておき、答えのあとで、前回の続きで開くもの・開いているものと重ならないものだけを開く
+- 更新方式の判定（updater.js restrictedPc）で、セキュリティソフトのフォルダー名を直接書かず、小文字にした名前の SHA-256 で照らし合わせる
+
 ## 1.5.28 の変更点
 
 - ページの絵の画素数を、ページの枠（div）と同じ四捨五入で決める（viewer.js renderCanvas）。これまでは切り捨てで 1 画素小さく、CSS で引き伸ばされて全体がにじんでいた。pdf.js には縦横別の倍率（canvas の画素数 ÷ viewport）を渡す

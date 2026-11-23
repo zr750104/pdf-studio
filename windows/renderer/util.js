@@ -134,11 +134,13 @@ export function progress(title, total) {
   const label = el('div', { class: 'message' }, '');
   const p = { cancelled: false };
   const box = el('div', { class: 'modal', style: 'width:420px' }, el('h2', {}, t(title)), el('div', { class: 'bar' }, bar), label,
-    el('div', { class: 'buttons' }, el('button', { onclick: () => { p.cancelled = true; label.textContent = '中止しています…'; } }, '中止')));
+    el('div', { class: 'buttons' }, el('button', { onclick: () => { p.cancelled = true; label.removeAttribute('translate'); label.textContent = t('中止しています…'); } }, '中止')));
   const backdrop = el('div', { class: 'backdrop' }, box);
   document.body.append(backdrop);
   setInert(1);
-  p.update = (done, text = '') => { bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`; label.textContent = `${done} / ${total}  ${t(text)}`; };
+  p.update = (done, text = '') => { bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`; label.removeAttribute('translate'); label.textContent = `${done} / ${total}  ${t(text)}`; };
+  // 途中の段階を出す（done は小数でもよい。text は訳したものをそのまま出す）。中止を押したあとは文言を変えない
+  p.status = (done, text) => { bar.style.width = `${Math.round((Math.min(done, total) / Math.max(1, total)) * 100)}%`; if (!p.cancelled) { label.setAttribute('translate', 'no'); label.textContent = text; } };
   p.close = () => { if (backdrop.isConnected) { backdrop.remove(); setInert(-1); } };
   return p;
 }

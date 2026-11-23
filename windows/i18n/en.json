@@ -642,7 +642,19 @@
   "しおりが変わったため中止しました": "Cancelled because the bookmarks changed",
   "前回開いていたファイルを開きますか？": "Open the files that were open last time?",
   "開かない": "Don't Open",
-  "この確認を出さず、前回のファイルを開かないようにするには、「ファイル」メニューの「最近使ったファイル」にある「起動時に前回のファイルを開く」のチェックを外してください。": "To stop this question and never reopen previous files, turn off \"Reopen Previous Files at Startup\" under File > Recent Files."
+  "この確認を出さず、前回のファイルを開かないようにするには、「ファイル」メニューの「最近使ったファイル」にある「起動時に前回のファイルを開く」のチェックを外してください。": "To stop this question and never reopen previous files, turn off \"Reopen Previous Files at Startup\" under File > Recent Files.",
+  "比較するファイルを開いています": "Opening the file to compare",
+  "ページ {i} / {n}": "Page {i} of {n}",
+  "図面の種類を調べています": "Checking the drawing type",
+  "古い版を描いています": "Drawing the old version",
+  "新しい版を描いています": "Drawing the new version",
+  "位置を合わせ、違いを調べています": "Aligning and finding differences",
+  "線のまま重ねたページを作っています": "Creating the overlay page with vector lines",
+  "結果のファイルを書き出しています": "Writing the result file",
+  "黒：共通の線": "Black: lines in both",
+  "{p}：{s}": "{p}: {s}",
+  "位置を合わせ、違いを調べ、色分けした画像を作っています": "Aligning, finding differences, and creating the color-coded image",
+  "{n} ページは画像で重ねました（スキャン画像、画層や注釈のある図面など。拡大すると粗く見えます）": "Page(s) overlaid as images: {n} (scanned images, drawings with layers or annotations, etc. They look coarse when zoomed in.)"
  },
  "patterns": [
   [

@@ -1425,7 +1425,7 @@ async function pageEditTests() {
 
 // 図面の重ね合わせ比較：ずれを見つけて合わせ、足した線だけを「新しい版だけ」として色分けする
 async function overlayTests() {
-  const drawing = async (shift, extra) => {
+  const drawing = async (shift, extra, gone = false) => {
     const d = await PL.PDFDocument.create();
     const p = d.addPage([842, 595]); // A4 横
     const [sx, sy] = shift;
@@ -1434,6 +1434,7 @@ async function overlayTests() {
     for (let k = 0; k < 12; k++) line(80 + k * 55, 80, 120 + k * 55, 300 + (k % 3) * 60, 0.8); // 図
     line(100, 420, 500, 420, 2); line(300, 330, 300, 520, 2);
     if (extra) line(560, 120, 760, 260, 1.5); // 新しい版で足した線
+    if (gone) line(560, 450, 760, 500, 1.5); // 古い版だけにある線
     return d.save();
   };
   const oldBytes = await drawing([0, 0], false);
@@ -1447,6 +1448,8 @@ async function overlayTests() {
   const s = 200 / 72;
   const okShift = Math.abs(r.shiftPx[0] + 6 * s) <= 2 && Math.abs(r.shiftPx[1] - 4 * s) <= 2;
   check(okShift, `重ねて比較：ずれを見つけて合わせる (${r.shiftPx.join(', ')} 画素 / 期待 ${(-6 * s).toFixed(1)}, ${(4 * s).toFixed(1)} → ${r.shiftMm.join(', ')} mm)`);
+  // 線のまま重ねるときに使う細かいずれ（6pt・4pt ずれた版）。1 画素より細かく合う
+  check(Math.abs(r.shiftPt[0] + 6) < 0.2 && Math.abs(r.shiftPt[1] - 4) < 0.2, `重ねて比較：ずれを 1 画素より細かく求める (${r.shiftPt.map((v) => v.toFixed(2)).join(', ')} pt / 期待 -6, 4)`);
   check(r.added > 300 && r.removed < r.added * 0.1, `重ねて比較：足した線だけが新しい版だけの線になる（縁は色づかない） (新 ${r.added} / 旧 ${r.removed} / 線全体 ${r.total}, ${ms}ms)`);
   // 同じ図面同士では違いがない
   const same = await F.overlayPages(await state.pdf.getPage(1), await state.pdf.getPage(1));
@@ -1465,6 +1468,162 @@ async function overlayTests() {
   if (res) { await tab({ do: 'activate', id: res.id }); await sleep(1500); await tab({ do: 'shot-any', id: res.id, name: 'overlay-result' }); await tab({ do: 'activate', id: self }); }
   for (const x of tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
   window.__askQueue = [];
+  const lo = window.__lastOverlay || {};
+  check(lo.vectorPages === 1 && lo.changedPages === 1, `重ねて比較：線の図面は線のまま重ねる (${JSON.stringify({ v: lo.vectorPages, c: lo.changedPages })})`);
+
+  // 線のまま重ねた結果を細かく描いて、色と鋭さを確かめる（古い版だけ＝赤、新しい版だけ＝青、共通＝黒、何もない所＝白）
+  await openBytes(await drawing([0, 0], false, true), { name: 'old-drawing2.pdf', askPassword: async () => null });
+  await ready();
+  window.__keepOverlay = true;
+  answer({});
+  await F.compareOverlay({ files: [{ name: 'new-drawing.pdf', bytes: newBytes }] });
+  window.__keepOverlay = false;
+  window.__askQueue = [];
+  for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+  const vb = window.__lastOverlay?.bytes;
+  let colors = null;
+  if (vb) {
+    const rd = await pdfjsLib.getDocument({ data: vb.slice(), ...PDFJS_OPTS }).promise;
+    const pg = await rd.getPage(1);
+    const k = 400 / 72; // 400dpi（拡大しても線が鋭いか）
+    const vp = pg.getViewport({ scale: k });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+    await pg.render({ canvasContext: cx, viewport: vp }).promise;
+    // (x, y)：ページの座標（上向き）。そのまわり ±r 画素で、条件に合う画素があるか
+    const px = (x, y) => { const d = cx.getImageData(Math.round(x * k), Math.round((595 - y) * k), 1, 1).data; return [d[0], d[1], d[2]]; };
+    const near = (x, y, ok, r = 5) => { for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { const v = px(x + dx / k, y + dy / k); if (ok(v)) return v; } return null; };
+    // 共通の線（枠の下の辺）を縦に切って、濃い部分の太さを数える（1.2pt ≒ 6.7 画素。画像で重ねると粗くなる）
+    let thick = 0;
+    for (let dy = -12; dy <= 12; dy++) { const v = px(420, 40 + dy / k); if (Math.max(...v) < 110) thick++; }
+    colors = {
+      common: near(420, 40, (v) => Math.max(...v) < 70),
+      added: near(660, 190, (v) => v[2] > 170 && v[0] < 110),
+      removed: near(660, 475, (v) => v[0] > 170 && v[1] < 90 && v[2] < 90),
+      white: px(650, 520).every((x) => x > 240),
+      thick
+    };
+    c.width = 0;
+    rd.destroy();
+  }
+  check(colors && colors.common && colors.added && colors.removed && colors.white && colors.thick >= 5 && colors.thick <= 9,
+    `重ねて比較：線のまま重ねた結果が、拡大しても鋭く正しい色になる (${JSON.stringify(colors)})`);
+
+  // いろいろなページ：1 普通／2 回転 90 度＋切り抜き（原点が 0 でない）／3 白紙（中身なし）／4 注釈あり（画像で重ねる）／
+  // 5 色付きの線を、中身が合成の仕方（/BM /Normal）を決めて描く（それでも共通の線は黒）。1 ページ目からほかのページへのリンク（出力が膨らまない）
+  const multi = async (extra) => {
+    const d = await PL.PDFDocument.create();
+    const lines = (p) => {
+      const ln = (x1, y1, x2, y2, w = 1.2) => p.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: w });
+      ln(60, 40, 780, 40); ln(780, 40, 780, 550); ln(780, 550, 60, 550); ln(60, 550, 60, 40);
+      for (let k = 0; k < 10; k++) ln(90 + k * 60, 80, 130 + k * 60, 330, 0.8);
+    };
+    const p1 = d.addPage([842, 595]); lines(p1);
+    const p2 = d.addPage([842, 595]); lines(p2); p2.setRotation(PL.degrees(90)); p2.setCropBox(50, 30, 742, 535);
+    if (extra) p2.drawLine({ start: { x: 560, y: 120 }, end: { x: 760, y: 260 }, thickness: 1.5 });
+    d.addPage([842, 595]);
+    const p4 = d.addPage([842, 595]); lines(p4);
+    p4.node.addAnnot(d.context.register(d.context.obj({ Type: 'Annot', Subtype: 'Square', Rect: [100, 400, 300, 500], C: [1, 0, 0] })));
+    const p5 = d.addPage([842, 595]);
+    p5.node.setExtGState(PL.PDFName.of('GS0'), d.context.obj({ Type: 'ExtGState', BM: 'Normal' }));
+    p5.pushOperators(PL.setGraphicsState('GS0'), PL.setStrokingRgbColor(0, 0, 1), PL.setLineWidth(3), PL.moveTo(100, 100), PL.lineTo(700, 300), PL.stroke());
+    // 緑の線（明るさが中くらい。線として数える色なので、共通なら黒になる）
+    p5.pushOperators(PL.setStrokingRgbColor(0, 0.7, 0), PL.setLineWidth(3), PL.moveTo(100, 400), PL.lineTo(700, 500), PL.stroke());
+    for (let k = 2; k <= 5; k++) p1.node.addAnnot(d.context.register(d.context.obj({ Type: 'Annot', Subtype: 'Link', Rect: [10, k * 10, 20, k * 10 + 8], Border: [0, 0, 0], Dest: [d.getPage(k - 1).ref, 'Fit'] })));
+    return d.save();
+  };
+  await openBytes(await multi(false), { name: 'multi-old.pdf', askPassword: async () => null });
+  await ready();
+  const multiNew = await multi(true);
+  window.__keepOverlay = true;
+  answer({});
+  await F.compareOverlay({ files: [{ name: 'multi-new.pdf', bytes: multiNew }] });
+  window.__keepOverlay = false;
+  window.__askQueue = [];
+  for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+  const mo = window.__lastOverlay || {};
+  let rot = null;
+  if (mo.bytes) {
+    const rd = await pdfjsLib.getDocument({ data: mo.bytes.slice(), ...PDFJS_OPTS }).promise;
+    const sample = async (pageNo, pts) => {
+      // 元の（古い版の）ページの座標を、結果のページの画素へ（結果のページは元の見た目の向き・範囲と同じ）
+      const k = 300 / 72;
+      const vpOld = (await state.pdf.getPage(pageNo)).getViewport({ scale: k });
+      const pg = await rd.getPage(pageNo);
+      const vp = pg.getViewport({ scale: k });
+      const c = document.createElement('canvas');
+      c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+      await pg.render({ canvasContext: cx, viewport: vp }).promise;
+      const res = {};
+      for (const [name, x, y, ok] of pts) {
+        const [X, Y] = vpOld.convertToViewportPoint(x, y);
+        let hit = null;
+        for (let dy = -6; dy <= 6 && !hit; dy++) for (let dx = -6; dx <= 6 && !hit; dx++) { const v = [...cx.getImageData(Math.round(X) + dx, Math.round(Y) + dy, 1, 1).data].slice(0, 3); if (ok(v)) hit = v; }
+        res[name] = hit;
+      }
+      c.width = 0;
+      return res;
+    };
+    rot = {
+      p2: await sample(2, [['common', 420, 40, (v) => Math.max(...v) < 80], ['added', 660, 190, (v) => v[2] > 170 && v[0] < 110]]),
+      p4: await sample(4, [['common', 420, 40, (v) => Math.max(...v) < 140 && Math.abs(v[0] - v[2]) < 30], ['white', 700, 450, (v) => Math.min(...v) > 240]]),
+      p5: await sample(5, [['common', 400, 200, (v) => Math.max(...v) < 110], ['green', 400, 450, (v) => Math.max(...v) < 110]]),
+      size: mo.bytes.length
+    };
+    rd.destroy();
+  }
+  check(mo.pages === 5 && mo.vectorPages === 4 && mo.changedPages === 1,
+    `重ねて比較：回転・切り抜き・白紙・リンクのあるページは線のまま、注釈のあるページは画像で重ね、違いは 1 ページだけ (${JSON.stringify({ p: mo.pages, v: mo.vectorPages, c: mo.changedPages })})`);
+  check(rot && rot.p2.common && rot.p2.added && rot.p4.common && rot.p4.white && rot.p5.common && rot.p5.green && rot.size < 2.5e6,
+    `重ねて比較：回転・切り抜きのあるページでも位置と色が合い、中身が合成の仕方を決めていても共通の線は黒、画像で重ねたページも正しく出て、出力も膨らまない (${JSON.stringify(rot)})`);
+
+  // 大きな図面（A0・線 3000 本）でも、比べている間に画面が長く止まらない（進み具合と「中止」が動く）
+  const big = async (extra) => {
+    const d = await PL.PDFDocument.create();
+    const p = d.addPage([2384, 3370]);
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let k2 = 0; k2 < 3000; k2++) { const x = 50 + rnd() * 2280, y = 50 + rnd() * 3270; p.drawLine({ start: { x, y }, end: { x: x + (rnd() - 0.5) * 200, y: y + (rnd() - 0.5) * 200 }, thickness: 0.5 }); }
+    if (extra) p.drawLine({ start: { x: 300, y: 300 }, end: { x: 1500, y: 900 }, thickness: 2 });
+    return d.save();
+  };
+  await openBytes(await big(false), { name: 'big-old.pdf', askPassword: async () => null });
+  await ready();
+  const bigNew = await big(true);
+  let maxGap = 0, last = performance.now(), ticking = true;
+  const tick = () => { const now = performance.now(); maxGap = Math.max(maxGap, now - last); last = now; if (ticking) setTimeout(tick, 20); };
+  setTimeout(tick, 20);
+  const tb = performance.now();
+  answer({});
+  window.__keepOverlay = true;
+  await F.compareOverlay({ files: [{ name: 'big-new.pdf', bytes: bigNew }] });
+  window.__keepOverlay = false;
+  ticking = false;
+  // 結果を画面に出すときの重さ：A0 の結果を約 800 万画素（画面いっぱいより大きめ）で描く時間
+  let drawMs = null;
+  if (window.__lastOverlay?.bytes) {
+    const rd = await pdfjsLib.getDocument({ data: window.__lastOverlay.bytes.slice(), ...PDFJS_OPTS }).promise;
+    const pg = await rd.getPage(1);
+    const v1 = pg.getViewport({ scale: 1 });
+    const vp = pg.getViewport({ scale: Math.sqrt(8e6 / (v1.width * v1.height)) });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const t1 = performance.now();
+    await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    drawMs = Math.round(performance.now() - t1);
+    c.width = 0;
+    rd.destroy();
+  }
+  window.__askQueue = [];
+  for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+  check(F.overlayWorkerOk(), '重ねて比較：位置合わせと色分けの計算は、画面とは別のスレッド（ワーカー）で行う');
+  check(window.__lastOverlay?.vectorPages === 1 && maxGap < 800,
+    `重ねて比較：大きな図面でも画面が長く止まらない (止まった最長 ${Math.round(maxGap)}ms, 全体 ${Math.round(performance.now() - tb)}ms)`);
+  check(drawMs != null && drawMs < 3000, `重ねて比較：線のまま重ねた A0 の結果を画面に描く時間 (${drawMs}ms)`);
 
   // スキャン図面（白黒の TIFF）：今の文書は速い描き方、相手は pdf.js で描いても、同じ図面なら違いが出ない。強く縮小しても線が消えたり色づいたりしない
   await F.openHere(await (await fetch('app://local/test/fixtures/fax_g4.tif')).arrayBuffer().then((b) => new Uint8Array(b)), null, 'scan.tif');
