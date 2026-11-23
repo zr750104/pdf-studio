@@ -1658,7 +1658,10 @@ if (!app.requestSingleInstanceLock()) {
       try { if ((await askRestore()).open) ok = await restoreSession(); } catch (e) { updater.log('ERROR', e); }
       askingRestore = false;
       // 聞いている間にほかから開くよう頼まれたファイル
-      const queued = pendingOpen.splice(0);
+      // 前回の続きで開くもの（まだタブになっていないものも）・開いているもの・ためた中の重なりは除く
+      const busy = [...[...hosts.values()].flatMap((h) => (h.restoring || []).map((t) => t.path)), ...[...windows.values()].map((t) => t.path)].filter(Boolean);
+      const queued = [];
+      for (const f of pendingOpen.splice(0)) if (![...busy, ...queued].some((x) => samePath(x, f))) queued.push(f);
       try { queued.forEach(openPath); } catch (e) { updater.log('ERROR', e); }
       if (queued.length) ok = true;
       try { if (!ok && !hosts.size) createWindow(); } catch (e) { updater.log('ERROR', e); }
