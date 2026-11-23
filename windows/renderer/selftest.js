@@ -1453,7 +1453,8 @@ async function overlayTests() {
   check(r.added > 300 && r.removed < r.added * 0.1, `重ねて比較：足した線だけが新しい版だけの線になる（縁は色づかない） (新 ${r.added} / 旧 ${r.removed} / 線全体 ${r.total}, ${ms}ms)`);
   // 同じ図面同士では違いがない
   const same = await F.overlayPages(await state.pdf.getPage(1), await state.pdf.getPage(1));
-  check(same.added + same.removed === 0 && same.shiftPx.join() === '0,0', `重ねて比較：同じ図面同士は違いなし (${same.added + same.removed})`);
+  check(same.added + same.removed === 0 && same.shiftPx.join() === '0,0' && Math.abs(same.shiftPt[0]) < 0.05 && Math.abs(same.shiftPt[1]) < 0.05,
+    `重ねて比較：同じ図面同士は違いなし・細かいずれも 0 (${same.added + same.removed}, ${same.shiftPt.map((v) => v.toFixed(3)).join(', ')} pt)`);
   other.destroy();
   // メニューと同じ流れ：結果を新しいタブに開く
   const info = () => api.selftest('tabs');
@@ -1580,6 +1581,76 @@ async function overlayTests() {
     `重ねて比較：回転・切り抜き・白紙・リンクのあるページは線のまま、注釈のあるページは画像で重ね、違いは 1 ページだけ (${JSON.stringify({ p: mo.pages, v: mo.vectorPages, c: mo.changedPages })})`);
   check(rot && rot.p2.common && rot.p2.added && rot.p4.common && rot.p4.white && rot.p5.common && rot.p5.green && rot.size < 2.5e6,
     `重ねて比較：回転・切り抜きのあるページでも位置と色が合い、中身が合成の仕方を決めていても共通の線は黒、画像で重ねたページも正しく出て、出力も膨らまない (${JSON.stringify(rot)})`);
+
+  // A0 の細い線（0.3pt）を半端な量（3.37pt・2.71pt）ずらした版：共通の線が赤と青の二重線にならず、暗い 1 本になる
+  const thin = async (sx, sy) => {
+    const d = await PL.PDFDocument.create();
+    const p = d.addPage([2384, 3370]);
+    const ln = (x1, y1, x2, y2) => p.drawLine({ start: { x: x1 + sx, y: y1 + sy }, end: { x: x2 + sx, y: y2 + sy }, thickness: 0.3 });
+    ln(100, 100, 2280, 100); ln(2280, 100, 2280, 3270); ln(2280, 3270, 100, 3270); ln(100, 3270, 100, 100);
+    // 不規則な線（同じ間隔で並んだ線だけだと、線 1 本ぶんずれた位置もよく重なってしまうため、実際の図面に近くする）
+    let seed = 11;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let k = 0; k < 400; k++) { const x = 150 + rnd() * 2000, y = 150 + rnd() * 3000; ln(x, y, x + (rnd() - 0.5) * 300, y + (rnd() - 0.5) * 300); }
+    ln(200, 1000, 2000, 1000); ln(1200, 400, 1200, 2900);
+    return d.save();
+  };
+  await openBytes(await thin(0, 0), { name: 'thin-old.pdf', askPassword: async () => null });
+  await ready();
+  window.__keepOverlay = true;
+  answer({});
+  await F.compareOverlay({ files: [{ name: 'thin-new.pdf', bytes: await thin(3.37, 2.71) }] });
+  window.__keepOverlay = false;
+  window.__askQueue = [];
+  for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+  let thinRes = null;
+  if (window.__lastOverlay?.bytes) {
+    const rd = await pdfjsLib.getDocument({ data: window.__lastOverlay.bytes.slice(), ...PDFJS_OPTS }).promise;
+    const pg = await rd.getPage(1);
+    const k = 600 / 72; // 600dpi で、横の共通の線（y = 1000）のまわりだけを描く
+    const vp = pg.getViewport({ scale: k, offsetX: -1100 * k + 50, offsetY: -(3370 - 1000) * k + 50 });
+    const c = document.createElement('canvas');
+    c.width = 100; c.height = 100;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, 100, 100);
+    await pg.render({ canvasContext: cx, viewport: vp }).promise;
+    let dark = 0, red = 0, blue = 0;
+    for (let y = 30; y < 70; y++) {
+      const [r, g, b2] = cx.getImageData(50, y, 1, 1).data;
+      if (Math.max(r, g, b2) < 120) dark++;
+      else if (r > 150 && b2 < 110 && g < 110) red++;
+      else if (b2 > 150 && r < 110) blue++;
+    }
+    thinRes = { dark, red, blue, v: window.__lastOverlay.vectorPages, c: window.__lastOverlay.changedPages };
+    c.width = 0;
+    rd.destroy();
+  }
+  check(thinRes && thinRes.v === 1 && thinRes.c === 0 && thinRes.dark >= 1 && thinRes.red === 0 && thinRes.blue === 0,
+    `重ねて比較：A0 の細い線を半端にずらしても、共通の線は二重線にならず暗い 1 本になる (${JSON.stringify(thinRes)})`);
+
+  // 画層（オプションコンテンツ）のある図面：全部表示なら線のまま、隠れた画層があれば画像で重ねる
+  const layered = async (hidden) => {
+    const d = await PL.PDFDocument.create();
+    const ocg = d.context.register(d.context.obj({ Type: 'OCG', Name: PL.PDFString.of('L0') }));
+    d.catalog.set(PL.PDFName.of('OCProperties'), d.context.obj({ OCGs: [ocg], D: { Order: [ocg], OFF: hidden ? [ocg] : [] } }));
+    const p = d.addPage([842, 595]);
+    p.drawLine({ start: { x: 50, y: 50 }, end: { x: 790, y: 50 }, thickness: 1 });
+    p.node.set(PL.PDFName.of('Resources'), d.context.obj({ Properties: { MC0: ocg } }));
+    p.pushOperators(PL.PDFOperator.of('BDC', [PL.PDFName.of('OC'), PL.PDFName.of('MC0')]), PL.moveTo(100, 300), PL.lineTo(700, 300), PL.stroke(), PL.PDFOperator.of('EMC'));
+    return d.save();
+  };
+  const layerRun = async (hidden) => {
+    const bytesL = await layered(hidden);
+    await openBytes(bytesL, { name: 'layer-old.pdf', askPassword: async () => null });
+    await ready();
+    answer({});
+    await F.compareOverlay({ files: [{ name: 'layer-new.pdf', bytes: bytesL }] });
+    window.__askQueue = [];
+    for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
+    return window.__lastOverlay?.vectorPages;
+  };
+  const lv = await layerRun(false), lh = await layerRun(true);
+  check(lv === 1 && lh === 0, `重ねて比較：画層が全部表示なら線のまま、隠れた画層があれば画像で重ねる (全部表示 ${lv} / 隠れあり ${lh})`);
 
   // 大きな図面（A0・線 3000 本）でも、比べている間に画面が長く止まらない（進み具合と「中止」が動く）
   const big = async (extra) => {

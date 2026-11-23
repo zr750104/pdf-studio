@@ -1166,9 +1166,10 @@ const nextFrame = () => new Promise((r) => { let done = false; const go = () => 
  * image=true なら色分けした画像も作る（rgbz：RGB の画素を Flate で圧縮したもの。imgW × imgH）。
  * renderA(s, annotations)：古い版のページを描く関数（今の文書のスキャン画像のページは、速い描き方で描けるように）。
  * annotations=false：注釈を描かずに比べる（線のまま重ねるときは注釈を写さないので、数も合わせる）。
+ * threshold：この明るさ（0〜255）より暗い画素を線とみなす
  * onStage(割合 0〜1, 段階)：進み具合
  */
-export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, renderA = null, image = true, annotations = true, onStage = null } = {}) {
+export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, renderA = null, image = true, annotations = true, threshold = 160, onStage = null } = {}) {
   const va = pageA.getViewport({ scale: 1 }), vb = pageB.getViewport({ scale: 1 });
   // 同じ実寸の縮尺で描く（画素の大きさではそろえない）。大きい方のページが上限に収まるように
   const s = Math.min(dpi / 72, Math.sqrt(maxPixels / Math.max(va.width * va.height, vb.width * vb.height)));
@@ -1176,11 +1177,11 @@ export async function overlayPages(pageA, pageB, { maxPixels = 12e6, dpi = 200, 
   // 線だけを取り出したら、画素はすぐ手放す（大きな図面でメモリを使いすぎないように）
   let img = renderA ? await renderA(s, annotations) : await renderForCompare(pageA, s, annotations);
   const w = img.width, h = img.height;
-  const a = darkMask(img);
+  const a = darkMask(img, threshold);
   await onStage?.(0.3, '新しい版を描いています');
   img = await renderForCompare(pageB, s, annotations);
   const bw = img.width, bh = img.height;
-  const b = darkMask(img);
+  const b = darkMask(img, threshold);
   img = null;
   pageB.cleanup();
   await onStage?.(0.55, image ? '位置を合わせ、違いを調べ、色分けした画像を作っています' : '位置を合わせ、違いを調べています');
@@ -1296,8 +1297,17 @@ function rasterOverlayPage(out, r) {
   return page;
 }
 
-/** 文書に画層（オプションコンテンツ）があるか。あると、隠した画層まで写ってしまうので画像で重ねる */
+/** 文書に画層（オプションコンテンツ）があるか */
 const hasLayers = (lib) => !!lib.catalog.get(PL.PDFName.of('OCProperties'));
+/** 画面に出すときに、隠れている画層が 1 つもないか（あると、線のまま重ねたとき隠れた線まで写るので画像で重ねる） */
+async function allLayersVisible(pdf) {
+  try {
+    const groups = (await pdf.getOptionalContentConfig()).getGroups();
+    return !groups || Object.values(groups).every((g) => g.visible);
+  } catch {
+    return false;
+  }
+}
 
 /** 今の文書（古い版）と、選んだファイル（新しい版）のページを重ねて、違いを色分けした PDF を新しいタブに作る */
 export async function compareOverlay({ files = null } = {}) {
@@ -1345,8 +1355,14 @@ export async function compareOverlay({ files = null } = {}) {
       let given = false;
       try { libB = (await loadLib(opened.data.slice(), async () => { if (given) return null; given = true; return opened.password; })).lib; } catch { libB = null; }
     }
-    // 画層のある文書は、隠した画層まで写ってしまうので画像で重ねる
-    if (libA && libB && (hasLayers(libA) || hasLayers(libB))) { libA = null; libB = null; }
+    // 画像で重ねた理由ごとのページ数（記録用。原因を追えるように）
+    const reasons = {};
+    const why = (k) => { reasons[k] = (reasons[k] || 0) + 1; };
+    const docReason = !libA ? 'lib-old' : !libB ? 'lib-new' : null;
+    // 画層のある文書で、隠れている画層があれば画像で重ねる（線のままだと隠れた線まで写る）。全部表示なら線のままでよい
+    let layerHidden = false;
+    if (libA && libB) layerHidden = (hasLayers(libA) && !(await allLayersVisible(state.pdf))) || (hasLayers(libB) && !(await allLayersVisible(other)));
+    if (layerHidden) { libA = null; libB = null; }
     // 素材（フォント・画像）を写す道具は、文書ごとに 1 つ（同じものを何度も写さない）
     const copierA = libA && libB ? PL.PDFObjectCopier.for(libA.context, out.context) : null;
     const copierB = libA && libB ? PL.PDFObjectCopier.for(libB.context, out.context) : null;
@@ -1364,8 +1380,11 @@ export async function compareOverlay({ files = null } = {}) {
       // スキャン画像（細かな汚れを違いにしないよう 2 画素の許容がある）・注釈のあるページ（注釈も比べる）・pdf-lib でそのページを読めないとき
       let parts = null;
       try {
-        if (copierA && i < libA.getPageCount() && i < libB.getPageCount() &&
-            !(await isScanPage(pa)) && !(await isScanPage(pb)) && !(await hasMarkup(pa)) && !(await hasMarkup(pb))) {
+        if (!copierA) why(docReason || 'layers');
+        else if (!(i < libA.getPageCount() && i < libB.getPageCount())) why('page-count');
+        else if ((await isScanPage(pa)) || (await isScanPage(pb))) why('scan');
+        else if ((await hasMarkup(pa)) || (await hasMarkup(pb))) why('annotations');
+        else {
           // 両方の中身を先に展開する（展開できないページは、出力に何も足す前に画像で重ねる方に切り替わる）
           const pgA = libA.getPage(i), pgB = libB.getPage(i);
           const bytesA = pageContentBytes(pgA), bytesB = pageContentBytes(pgB);
@@ -1374,6 +1393,7 @@ export async function compareOverlay({ files = null } = {}) {
       } catch (e) {
         if (e?.message === 'CANCELLED') throw e;
         window.api?.logInfo?.(`overlay: page ${i + 1} falls back to image (${e?.message || e})`);
+        why('error');
         parts = null;
       }
       const vector = !!parts;
@@ -1386,7 +1406,9 @@ export async function compareOverlay({ files = null } = {}) {
       };
       // 線のまま重ねるときの画像は、ずれと違いの量を調べるためだけに使う（注釈は写さないので描かない）。
       // 画像で重ねるときは細かく描く（元のスキャンの細かさに近づける）
-      const r = await overlayPages(pa, pb, { renderA, image: !vector, annotations: !vector, maxPixels: vector ? 12e6 : 30e6, onStage });
+      // 線の図面は、細い線（調べる画像で 1 画素より細く、薄い灰色に描かれる）も線として数えるよう、明るさの境目を上げる。
+      // スキャン画像は細かな汚れを拾わないよう、これまでどおり
+      const r = await overlayPages(pa, pb, { renderA, image: !vector, annotations: !vector, maxPixels: vector ? 12e6 : 30e6, threshold: vector ? 230 : 160, onStage });
       let page;
       if (vector) {
         await onStage(0.9, '線のまま重ねたページを作っています');
@@ -1410,6 +1432,8 @@ export async function compareOverlay({ files = null } = {}) {
       page.drawRectangle({ x: size * 0.6, y: r.heightPt - boxH - size * 0.6, width: boxW, height: boxH, color: PL.rgb(1, 1, 1), opacity: 0.9, borderColor: PL.rgb(0.6, 0.6, 0.6), borderWidth: 0.5 });
       lines.forEach(([s2, color], k) => page.drawText(s2, { x: size * 1.2, y: r.heightPt - size * 0.6 - size * 1.4 * (k + 1), size, font, color }));
     }
+    // ファイル名は書かない
+    window.api?.logInfo?.(`overlay: ${n} pages, vector ${vectorPages}, image ${JSON.stringify(reasons)}`);
     pr.status(n, t('結果のファイルを書き出しています'));
     await nextFrame();
     bytes = await out.save();

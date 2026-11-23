@@ -61,34 +61,70 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
   const maxDim = Math.max(aw, ah, bw, bh);
   // 粗い順に：大きい辺が約 200・約 1000 画素、そして実寸
   const levels = [...new Set([Math.ceil(maxDim / 200), Math.ceil(maxDim / 1000), 1])].sort((x, y) => y - x);
-  let dx = 0, dy = 0, prevF = null, fx = 0, fy = 0;
+  const better = (s, x, y, bs, bx, by) => s > bs || (s === bs && Math.abs(x) + Math.abs(y) < Math.abs(bx) + Math.abs(by));
+  // 同じ間隔で並ぶ線（通り芯・格子など）では、粗い画像だと線 1 本ぶんずれた位置も同じくらい重なる。
+  // そこで粗い段では候補を上位いくつか残し、細かい段でそれぞれを詰めて、いちばん重なるものを選ぶ
+  const KEEP = 6;
+  let cands = [{ dx: 0, dy: 0 }];
+  let prevF = null, last = null;
   for (const f of levels) {
     const A = f > 1 ? shrink(a, aw, ah, f) : { mask: a, w: aw, h: ah };
     const B = f > 1 ? shrink(b, bw, bh, f) : { mask: b, w: bw, h: bh };
     const pts = samplePoints(A.mask, A.w, A.h);
-    if (!pts.length) return { dx: 0, dy: 0 };
-    // 最初は広く、次からは前の段の 1 画素ぶん（＋1）の範囲だけ
-    const R = prevF == null ? Math.ceil((maxDim * maxFrac) / f) + 1 : Math.ceil(prevF / f) + 1;
-    const cx = Math.round(dx / f), cy = Math.round(dy / f);
-    let best = -1, bx = cx, by = cy;
-    for (let sy = cy - R; sy <= cy + R; sy++) {
-      for (let sx = cx - R; sx <= cx + R; sx++) {
-        const s = score(pts, B.mask, B.w, B.h, sx, sy);
-        // 同点なら動かない方を選ぶ（白紙同士などで勝手にずらさない）
-        if (s > best || (s === best && Math.abs(sx) + Math.abs(sy) < Math.abs(bx) + Math.abs(by))) { best = s; bx = sx; by = sy; }
+    if (!pts.length) return { dx: 0, dy: 0, fx: 0, fy: 0 };
+    const next = [];
+    if (prevF == null) {
+      // 最初の段は広く探し、山（まわり 1 画素より高い所）を点数の順に上位 KEEP 個残す
+      const R = Math.ceil((maxDim * maxFrac) / f) + 1;
+      const side = 2 * R + 1;
+      const sc = new Int32Array(side * side);
+      for (let sy = -R; sy <= R; sy++) for (let sx = -R; sx <= R; sx++) sc[(sy + R) * side + (sx + R)] = score(pts, B.mask, B.w, B.h, sx, sy);
+      const peaks = [];
+      for (let sy = -R; sy <= R; sy++) {
+        for (let sx = -R; sx <= R; sx++) {
+          const v = sc[(sy + R) * side + (sx + R)];
+          let top = true;
+          for (let ky = -1; ky <= 1 && top; ky++) for (let kx = -1; kx <= 1; kx++) {
+            if (!kx && !ky) continue;
+            const yy = sy + ky, xx = sx + kx;
+            if (yy < -R || yy > R || xx < -R || xx > R) continue;
+            const w = sc[(yy + R) * side + (xx + R)];
+            // 同点の山は、動かない方に近いものだけを残す
+            if (w > v || (w === v && Math.abs(xx) + Math.abs(yy) < Math.abs(sx) + Math.abs(sy))) { top = false; break; }
+          }
+          if (top) peaks.push({ s: v, x: sx, y: sy });
+        }
       }
+      peaks.sort((p, q) => (better(p.s, p.x, p.y, q.s, q.x, q.y) ? -1 : 1));
+      for (const p of peaks.slice(0, KEEP)) next.push({ dx: p.x * f, dy: p.y * f, s: p.s, bx: p.x, by: p.y });
+    } else {
+      // 次からは、候補ごとに前の段の 1 画素ぶん（＋1）の範囲だけ
+      const R = Math.ceil(prevF / f) + 1;
+      for (const c of cands) {
+        const cx = Math.round(c.dx / f), cy = Math.round(c.dy / f);
+        let best = -1, bx = cx, by = cy;
+        for (let sy = cy - R; sy <= cy + R; sy++) {
+          for (let sx = cx - R; sx <= cx + R; sx++) {
+            const v = score(pts, B.mask, B.w, B.h, sx, sy);
+            // 同点なら動かない方を選ぶ（白紙同士などで勝手にずらさない）
+            if (better(v, sx, sy, best, bx, by)) { best = v; bx = sx; by = sy; }
+          }
+        }
+        if (!next.some((n) => n.bx === bx && n.by === by)) next.push({ dx: bx * f, dy: by * f, s: best, bx, by });
+      }
+      next.sort((p, q) => (better(p.s, p.bx, p.by, q.s, q.bx, q.by) ? -1 : 1));
     }
-    dx = bx * f;
-    dy = by * f;
+    cands = next.slice(0, KEEP);
     prevF = f;
-    if (f === 1) {
-      // 1 画素より細かいずれ：重なりの点数の山を、前後の点数で放物線に当てはめて頂点を推定する（線のまま重ねるときに使う）
-      const vertex = (m, c, p) => { const den = m - 2 * c + p; return den < 0 ? Math.max(-0.5, Math.min(0.5, (m - p) / (2 * den))) : 0; };
-      fx = vertex(score(pts, B.mask, B.w, B.h, bx - 1, by), best, score(pts, B.mask, B.w, B.h, bx + 1, by));
-      fy = vertex(score(pts, B.mask, B.w, B.h, bx, by - 1), best, score(pts, B.mask, B.w, B.h, bx, by + 1));
-    }
+    last = { pts, B };
   }
-  return { dx, dy, fx, fy };
+  const top = cands[0];
+  // 1 画素より細かいずれ：重なりの点数の山を、前後の点数で放物線に当てはめて頂点を推定する（線のまま重ねるときに使う）
+  const { pts, B } = last;
+  const vertex = (m, c, p) => { const den = m - 2 * c + p; return den < 0 ? Math.max(-0.5, Math.min(0.5, (m - p) / (2 * den))) : 0; };
+  const fx = vertex(score(pts, B.mask, B.w, B.h, top.bx - 1, top.by), top.s, score(pts, B.mask, B.w, B.h, top.bx + 1, top.by));
+  const fy = vertex(score(pts, B.mask, B.w, B.h, top.bx, top.by - 1), top.s, score(pts, B.mask, B.w, B.h, top.bx, top.by + 1));
+  return { dx: top.dx, dy: top.dy, fx, fy };
 }
 
 /** r 画素ぶん太らせる（四角い範囲の最大値。横と縦に分けて速く） */
