@@ -195,8 +195,14 @@ function updateMode() {
 function restrictedPc() {
   if (process.platform !== 'win32') return false;
   const dirs = [process.env.ProgramFiles, process.env.ProgramW6432, process.env['ProgramFiles(x86)'], process.env.ProgramData].filter(Boolean);
-  return dirs.some((d) => fs.existsSync(path.join(d, 'Sophos')));
+  // フォルダー名はそのまま書かず、小文字にした名前のハッシュ値（SHA-256）で照らし合わせる
+  const sha = (s) => require('crypto').createHash('sha256').update(s).digest('hex');
+  // 64 ビットの Windows では ProgramFiles と ProgramW6432 が同じ場所なので、重なりを除く
+  return [...new Set(dirs.map((d) => d.toLowerCase()))].some((d) => {
+    try { return fs.readdirSync(d).some((n) => RESTRICTED_DIRS.includes(sha(n.toLowerCase()))); } catch { return false; }
+  });
 }
+const RESTRICTED_DIRS = ['de882d5b65291a1b92677b2bcaa6840313236a51a8eefb8e1f6497a8adb0705a'];
 
 const setupUrl = (v) => `https://github.com/zr750104/pdf-studio/releases/download/v${v}/PDF-Studio-Setup-${v}.exe`;
 const zipUrl = (v) => `https://github.com/zr750104/pdf-studio/releases/download/v${v}/PDF-Studio-${v}-win.zip`;

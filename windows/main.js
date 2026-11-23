@@ -817,6 +817,9 @@ function openRecent(p, host = focusedHost() || lastHost) {
 let sessionTimer = null;
 let starting = true; // 起動の途中（前回の続きを開くまで）
 const startedAt = Date.now();
+let askingRestore = false; // 起動時に前回のファイルを開くかを聞いている間
+const pendingOpen = []; // 聞いている間に、二重起動で開くよう頼まれたファイル
+let keepDeclinedSession = false; // 「開かない」を選んだ（ファイルを開くまで前回の記録を残す）
 let quitting = false; // 終了の途中（閉じていくウィンドウで記録が減らないように）
 const restoreEnabled = () => getSetting('restoreSession') !== false;
 function sessionData() {
@@ -849,6 +852,10 @@ function scheduleSession() {
 function saveSessionNow() {
   clearTimeout(sessionTimer);
   const data = sessionData();
+  if (data && keepDeclinedSession) {
+    if (!data.windows.length) return;
+    keepDeclinedSession = false;
+  }
   if (data) setSetting('session', data);
 }
 /** ファイル・フォルダーがあるかを、時間を区切って確かめる（'yes' | 'no' | 'timeout'） */
@@ -913,6 +920,27 @@ async function restoreSession({ into = null } = {}) {
   }
   if (opened || missing) updater.log('INFO', `session restore: ${opened} tabs${missing ? `, ${missing} missing` : ''}`);
   return opened > 0;
+}
+
+/** 前回開いていたファイルを開くかを聞く。open: 開くか、asked: 聞いたか（前回の記録にファイルがなければ聞かない）。
+ *  answer を渡すと聞かずにその答え（0 開く / 1 開かない）を使う（自動テスト用） */
+async function askRestore(answer = null) {
+  const s = getSetting('session');
+  const paths = (Array.isArray(s?.windows) ? s.windows : []).flatMap((w) => (Array.isArray(w?.tabs) ? w.tabs : [])).map((t) => t?.path).filter(docPathOk);
+  if (!paths.length) return { open: false, asked: false, files: 0 };
+  const names = paths.slice(0, 10).map((p) => `- ${path.basename(p)}`);
+  if (paths.length > 10) names.push(T(`ほか ${paths.length - 10} 件`));
+  const { response } = answer != null ? { response: answer } : await dialog.showMessageBox({
+    type: 'question',
+    buttons: [T('開く'), T('開かない')],
+    defaultId: 0, cancelId: 1, noLink: true,
+    message: T('前回開いていたファイルを開きますか？'),
+    detail: `${names.join('\n')}\n\n${T('この確認を出さず、前回のファイルを開かないようにするには、「ファイル」メニューの「最近使ったファイル」にある「起動時に前回のファイルを開く」のチェックを外してください。')}`
+  });
+  updater.log('INFO', `session restore asked: ${response === 0 ? 'open' : 'skip'}`);
+  // 「開かない」（Esc・閉じるも同じ）：前回の記録は消さずに残す（ファイルを開くまで空の状態で上書きしない。次の起動でまた聞く）
+  if (response !== 0 && answer == null) keepDeclinedSession = true;
+  return { open: response === 0, asked: true, files: paths.length };
 }
 
 // 異常終了時の復元：保存していない文書の写しを、復元用フォルダーに時々書いておく（文書の画面から送られてくる）。
@@ -1372,6 +1400,7 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
       const sub = file?.submenu.items.find((y) => y.label === T('最近使ったファイル'))?.submenu;
       return sub ? sub.items.map((y) => ({ label: y.label, type: y.type, checked: y.checked, enabled: y.enabled })) : null;
     }
+    if (arg.do === 'ask-restore') return askRestore(arg.answer);
     if (arg.do === 'restore') {
       // 前回の続きを開き直す（新しいウィンドウに開く）。開いたタブの id を返す
       const before = new Set(windows.keys());
@@ -1581,6 +1610,8 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', (e, argv) => {
     const files = filesFromArgv(argv);
+    // 前回のファイルを開くかを聞いている間は、指定されたファイルをためておき、答えのあとで開く（ファイルなしなら何もしない）
+    if (askingRestore) { pendingOpen.push(...files); return; }
     if (files.length) files.forEach(openPath);
     // 起動の途中（前回の続きを開いている）は空のウィンドウを余分に作らない。
     // ただし、起動処理が失敗して印が残っても立ち直れるよう、10 秒たったら受け付ける
@@ -1621,9 +1652,15 @@ if (!app.requestSingleInstanceLock()) {
     if (files.length) files.forEach(openPath);
     else if (SELFTEST || !restoreEnabled()) createWindow();
     else {
-      // 前回の続き。開けなかった（失敗・開けるファイルがない）ときは空のウィンドウ
+      // 前回の続き。開く前に開くかどうかを聞く。開かない・開けなかった（失敗・開けるファイルがない）ときは空のウィンドウ
       let ok = false;
-      try { ok = await restoreSession(); } catch (e) { updater.log('ERROR', e); }
+      askingRestore = true;
+      try { if ((await askRestore()).open) ok = await restoreSession(); } catch (e) { updater.log('ERROR', e); }
+      askingRestore = false;
+      // 聞いている間にほかから開くよう頼まれたファイル
+      const queued = pendingOpen.splice(0);
+      try { queued.forEach(openPath); } catch (e) { updater.log('ERROR', e); }
+      if (queued.length) ok = true;
       try { if (!ok && !hosts.size) createWindow(); } catch (e) { updater.log('ERROR', e); }
     }
     starting = false;

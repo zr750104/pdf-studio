@@ -1533,6 +1533,9 @@ async function sessionTests(out) {
   st = await ses({ do: 'state' });
   const rec = st.session?.windows?.[0]?.tabs?.find((x) => x.path.endsWith('recent-a.pdf'));
   check(rec && rec.page === 2 && Math.abs(rec.scale - 1.5) < 0.01, `前回の続き：ファイル・ページ・倍率を覚える (${JSON.stringify(rec)})`);
+  // 起動時は開く前に聞く：「開く」なら開く、「開かない」なら開かない（ファイルがあるときだけ聞く）
+  const ak = await ses({ do: 'ask-restore', answer: 0 }), an = await ses({ do: 'ask-restore', answer: 1 });
+  check(ak.asked && ak.open && ak.files >= 1 && an.asked && !an.open, `前回の続き：起動時に開くかどうかを聞く (${JSON.stringify({ ak, an })})`);
   // 開き直すと同じページ・倍率になる（テストでは今のウィンドウのタブとして開く）
   const rs = await ses({ do: 'restore' });
   const restored = rs.tabs.find((x) => x.path?.endsWith('recent-a.pdf'));

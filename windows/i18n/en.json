@@ -639,7 +639,10 @@
   "これまでの測定の注釈は実寸のまま直しました。これから測るときは、大きさを変えたページで縮尺を合わせ直してください（「文書 > 縮尺を合わせる」）。": "Existing measurement annotations keep their real-world lengths. For new measurements, calibrate the scale again on the resized pages (Document > Calibrate Scale).",
   "{n} ページはスキャン画像と用紙の縦横比が違うため、保存すると表示が遅くなります（速い表示の対象から外れます）。": "{n} scanned pages have a different aspect ratio from the paper, so they will display more slowly after saving (fast display no longer applies).",
   "ページの大きさをそろえました": "Page size normalized",
-  "しおりが変わったため中止しました": "Cancelled because the bookmarks changed"
+  "しおりが変わったため中止しました": "Cancelled because the bookmarks changed",
+  "前回開いていたファイルを開きますか？": "Open the files that were open last time?",
+  "開かない": "Don't Open",
+  "この確認を出さず、前回のファイルを開かないようにするには、「ファイル」メニューの「最近使ったファイル」にある「起動時に前回のファイルを開く」のチェックを外してください。": "To stop this question and never reopen previous files, turn off \"Reopen Previous Files at Startup\" under File > Recent Files."
  },
  "patterns": [
   [
@@ -877,6 +880,10 @@
   [
    "^縮尺 (.+)$",
    "Scale $1"
+  ],
+  [
+   "^ほか (\\d+) 件$",
+   "and $1 more"
   ]
  ]
 }
