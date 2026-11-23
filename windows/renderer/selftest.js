@@ -1449,7 +1449,7 @@ async function overlayTests() {
   const okShift = Math.abs(r.shiftPx[0] + 6 * s) <= 2 && Math.abs(r.shiftPx[1] - 4 * s) <= 2;
   check(okShift, `重ねて比較：ずれを見つけて合わせる (${r.shiftPx.join(', ')} 画素 / 期待 ${(-6 * s).toFixed(1)}, ${(4 * s).toFixed(1)} → ${r.shiftMm.join(', ')} mm)`);
   // 線のまま重ねるときに使う細かいずれ（6pt・4pt ずれた版）。1 画素より細かく合う
-  check(Math.abs(r.shiftPt[0] + 6) < 0.2 && Math.abs(r.shiftPt[1] - 4) < 0.2, `重ねて比較：ずれを 1 画素より細かく求める (${r.shiftPt.map((v) => v.toFixed(2)).join(', ')} pt / 期待 -6, 4)`);
+  check(Math.abs(r.shiftPt[0] + 6) < 0.06 && Math.abs(r.shiftPt[1] - 4) < 0.06, `重ねて比較：ずれを 1 画素より細かく求める (${r.shiftPt.map((v) => v.toFixed(2)).join(', ')} pt / 期待 -6, 4)`);
   check(r.added > 300 && r.removed < r.added * 0.1, `重ねて比較：足した線だけが新しい版だけの線になる（縁は色づかない） (新 ${r.added} / 旧 ${r.removed} / 線全体 ${r.total}, ${ms}ms)`);
   // 同じ図面同士では違いがない
   const same = await F.overlayPages(await state.pdf.getPage(1), await state.pdf.getPage(1));
@@ -1530,8 +1530,9 @@ async function overlayTests() {
     const p5 = d.addPage([842, 595]);
     p5.node.setExtGState(PL.PDFName.of('GS0'), d.context.obj({ Type: 'ExtGState', BM: 'Normal' }));
     p5.pushOperators(PL.setGraphicsState('GS0'), PL.setStrokingRgbColor(0, 0, 1), PL.setLineWidth(3), PL.moveTo(100, 100), PL.lineTo(700, 300), PL.stroke());
-    // 緑の線（明るさが中くらい。線として数える色なので、共通なら黒になる）
-    p5.pushOperators(PL.setStrokingRgbColor(0, 0.7, 0), PL.setLineWidth(3), PL.moveTo(100, 400), PL.lineTo(700, 500), PL.stroke());
+    // 純色の緑の線（明るさが中くらい。共通なら暗くなる）と、黄色の線（明るい。うっすら色が出る）
+    p5.pushOperators(PL.setStrokingRgbColor(0, 1, 0), PL.setLineWidth(3), PL.moveTo(100, 400), PL.lineTo(700, 500), PL.stroke());
+    p5.pushOperators(PL.setStrokingRgbColor(1, 1, 0), PL.setLineWidth(3), PL.moveTo(100, 520), PL.lineTo(700, 570), PL.stroke());
     for (let k = 2; k <= 5; k++) p1.node.addAnnot(d.context.register(d.context.obj({ Type: 'Annot', Subtype: 'Link', Rect: [10, k * 10, 20, k * 10 + 8], Border: [0, 0, 0], Dest: [d.getPage(k - 1).ref, 'Fit'] })));
     return d.save();
   };
@@ -1572,14 +1573,14 @@ async function overlayTests() {
     rot = {
       p2: await sample(2, [['common', 420, 40, (v) => Math.max(...v) < 80], ['added', 660, 190, (v) => v[2] > 170 && v[0] < 110]]),
       p4: await sample(4, [['common', 420, 40, (v) => Math.max(...v) < 140 && Math.abs(v[0] - v[2]) < 30], ['white', 700, 450, (v) => Math.min(...v) > 240]]),
-      p5: await sample(5, [['common', 400, 200, (v) => Math.max(...v) < 110], ['green', 400, 450, (v) => Math.max(...v) < 110]]),
+      p5: await sample(5, [['common', 400, 200, (v) => Math.max(...v) < 110], ['green', 400, 450, (v) => Math.max(...v) < 110], ['yellow', 400, 545, (v) => Math.max(...v) < 235]]),
       size: mo.bytes.length
     };
     rd.destroy();
   }
   check(mo.pages === 5 && mo.vectorPages === 4 && mo.changedPages === 1,
     `重ねて比較：回転・切り抜き・白紙・リンクのあるページは線のまま、注釈のあるページは画像で重ね、違いは 1 ページだけ (${JSON.stringify({ p: mo.pages, v: mo.vectorPages, c: mo.changedPages })})`);
-  check(rot && rot.p2.common && rot.p2.added && rot.p4.common && rot.p4.white && rot.p5.common && rot.p5.green && rot.size < 2.5e6,
+  check(rot && rot.p2.common && rot.p2.added && rot.p4.common && rot.p4.white && rot.p5.common && rot.p5.green && rot.p5.yellow && rot.size < 2.5e6,
     `重ねて比較：回転・切り抜きのあるページでも位置と色が合い、中身が合成の仕方を決めていても共通の線は黒、画像で重ねたページも正しく出て、出力も膨らまない (${JSON.stringify(rot)})`);
 
   // A0 の細い線（0.3pt）を半端な量（3.37pt・2.71pt）ずらした版：共通の線が赤と青の二重線にならず、暗い 1 本になる
@@ -1607,26 +1608,51 @@ async function overlayTests() {
   if (window.__lastOverlay?.bytes) {
     const rd = await pdfjsLib.getDocument({ data: window.__lastOverlay.bytes.slice(), ...PDFJS_OPTS }).promise;
     const pg = await rd.getPage(1);
-    const k = 600 / 72; // 600dpi で、横の共通の線（y = 1000）のまわりだけを描く
-    const vp = pg.getViewport({ scale: k, offsetX: -1100 * k + 50, offsetY: -(3370 - 1000) * k + 50 });
-    const c = document.createElement('canvas');
-    c.width = 100; c.height = 100;
-    const cx = c.getContext('2d', { willReadFrequently: true });
-    cx.fillStyle = '#fff'; cx.fillRect(0, 0, 100, 100);
-    await pg.render({ canvasContext: cx, viewport: vp }).promise;
-    let dark = 0, red = 0, blue = 0;
-    for (let y = 30; y < 70; y++) {
-      const [r, g, b2] = cx.getImageData(50, y, 1, 1).data;
-      if (Math.max(r, g, b2) < 120) dark++;
-      else if (r > 150 && b2 < 110 && g < 110) red++;
-      else if (b2 > 150 && r < 110) blue++;
-    }
-    thinRes = { dark, red, blue, v: window.__lastOverlay.vectorPages, c: window.__lastOverlay.changedPages };
-    c.width = 0;
+    const k = 600 / 72; // 600dpi で、共通の線のまわりだけを描く（横の線 y = 1000 は縦のずれ、縦の線 x = 1200 は横のずれを見る）
+    const probe = async (x, y, vertical) => {
+      const vp = pg.getViewport({ scale: k, offsetX: -x * k + 50, offsetY: -(3370 - y) * k + 50 });
+      const c = document.createElement('canvas');
+      c.width = 100; c.height = 100;
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      cx.fillStyle = '#fff'; cx.fillRect(0, 0, 100, 100);
+      await pg.render({ canvasContext: cx, viewport: vp }).promise;
+      const o = { dark: 0, red: 0, blue: 0 };
+      for (let q = 30; q < 70; q++) {
+        const [r, g, b2] = cx.getImageData(vertical ? 50 : q, vertical ? q : 50, 1, 1).data;
+        if (Math.max(r, g, b2) < 120) o.dark++;
+        else if (r > 150 && b2 < 110 && g < 110) o.red++;
+        else if (b2 > 150 && r < 110) o.blue++;
+      }
+      c.width = 0;
+      return o;
+    };
+    thinRes = { h: await probe(1100, 1000, true), v: await probe(1200, 2000, false), pages: window.__lastOverlay.vectorPages, c: window.__lastOverlay.changedPages };
     rd.destroy();
   }
-  check(thinRes && thinRes.v === 1 && thinRes.c === 0 && thinRes.dark >= 1 && thinRes.red === 0 && thinRes.blue === 0,
+  // 600dpi で色の付いた縁が 1 画素（0.12pt）までなら、ずれの残りとして許す（二重線なら赤・青が何画素も並ぶ）
+  const one = (o) => o.dark >= 2 && o.red + o.blue <= 1;
+  check(thinRes && thinRes.pages === 1 && thinRes.c === 0 && one(thinRes.h) && one(thinRes.v),
     `重ねて比較：A0 の細い線を半端にずらしても、共通の線は二重線にならず暗い 1 本になる (${JSON.stringify(thinRes)})`);
+
+  // 格子（同じ間隔の線）の図面：線 1 本ぶんずれた位置を選ばない（枠と少しの線は不規則）
+  const grid = async (sx, sy) => {
+    const d = await PL.PDFDocument.create();
+    const p = d.addPage([842, 595]);
+    const ln = (x1, y1, x2, y2) => p.drawLine({ start: { x: x1 + sx, y: y1 + sy }, end: { x: x2 + sx, y: y2 + sy }, thickness: 0.6 });
+    for (let x = 60; x <= 780; x += 40) ln(x, 60, x, 540);
+    for (let y = 60; y <= 540; y += 40) ln(60, y, 780, y);
+    ln(30, 30, 812, 30); ln(812, 30, 812, 565); ln(812, 565, 30, 565); ln(30, 565, 30, 30);
+    ln(100, 100, 300, 250); ln(500, 400, 700, 120); ln(200, 500, 260, 330);
+    return d.save();
+  };
+  {
+    const ga = await pdfjsLib.getDocument({ data: (await grid(0, 0)).slice(), ...PDFJS_OPTS }).promise;
+    const gb = await pdfjsLib.getDocument({ data: (await grid(13, -9)).slice(), ...PDFJS_OPTS }).promise;
+    const gr = await F.overlayPages(await ga.getPage(1), await gb.getPage(1), { image: false, threshold: 230 });
+    check(Math.abs(gr.shiftPt[0] + 13) < 0.3 && Math.abs(gr.shiftPt[1] + 9) < 0.3,
+      `重ねて比較：格子の図面でも、線 1 本ぶんずれた位置を選ばない (${gr.shiftPt.map((v) => v.toFixed(2)).join(', ')} pt / 期待 -13, -9)`);
+    ga.destroy(); gb.destroy();
+  }
 
   // 画層（オプションコンテンツ）のある図面：全部表示なら線のまま、隠れた画層があれば画像で重ねる
   const layered = async (hidden) => {
@@ -1641,6 +1667,7 @@ async function overlayTests() {
   };
   const layerRun = async (hidden) => {
     const bytesL = await layered(hidden);
+    window.__lastOverlay = null;
     await openBytes(bytesL, { name: 'layer-old.pdf', askPassword: async () => null });
     await ready();
     answer({});

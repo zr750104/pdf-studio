@@ -1081,7 +1081,8 @@ async function openOtherForCompare(file, onAsk = null) {
     return { pdf: await pdfjsLib.getDocument({ data: data.slice(), ...PDFJS_OPTS }).promise, data, password: null };
   } catch (e) {
     if (e?.name !== 'PasswordException') throw e;
-    onAsk?.(true);
+    // onAsk(true) が false を返したら（もう中止を押した）、聞かずにやめる
+    if (onAsk?.(true) === false) return null;
     const pw = await askPassword(`${file.name} はパスワードで保護されています。`);
     onAsk?.(false);
     if (pw == null) return null;
@@ -1254,16 +1255,18 @@ function vectorOverlayPage(out, partA, vpA, partB, vpB, shiftPt) {
   const W = vpA.width, H = vpA.height;
   const box = `0 0 ${n4(W)} ${n4(H)} re f`;
   const rgbGroup = (extra = {}) => ({ Type: 'Group', S: 'Transparency', CS: 'DeviceRGB', ...extra });
-  // マスクの中で、ページの上に 0.4 の灰色を「焼き込み（ColorBurn）」で重ねる：値 v が (v − 0.6) ÷ 0.4 になり（0 未満は 0）、
-  // 0.6 より暗い色（線として数える色。緑や水色の線も）ははっきり色が出て、明るい所は白のまま。
-  // 線かどうかの判定（darkMask：明るさ 160/255 未満）と見た目をそろえる。（マスクの変換関数 /TR は pdf.js で正しく効かないため使わない）
+  // マスクの中で、ページの上に灰色を「彩度（Saturation）」で重ねて色を明るさだけの灰色にし（緑・黄などの純色の線も明るさで扱う）、
+  // さらに 0.25 の灰色を「焼き込み（ColorBurn）」で重ねる：明るさ v が (v − 0.75) ÷ 0.25 になる（0 未満は 0）。
+  // 明るさ 0.75 より暗い線ははっきり色が出て、0.9 の薄い線もうっすら色が出る（線として数える境目＝明るさ 230/255 とおおむねそろえる）。
+  // （マスクの変換関数 /TR は pdf.js で正しく効かないため使わない）
+  const satur = ctx.register(ctx.obj({ Type: 'ExtGState', BM: 'Saturation' }));
   const burn = ctx.register(ctx.obj({ Type: 'ExtGState', BM: 'ColorBurn' }));
   // pdf.js の変換（下向きの y）を、PDF の座標（上向きの y）に直す
   const mat = (vp, sx = 0, sy = 0) => { const [a, b, c, d, e, f] = vp.transform; return [a, -b, c, -d, e + sx, H - f - sy]; };
   const tinted = (part, m, color) => {
     // マスク：白地にページを置いた明るさ（線＝暗い＝色が出る、何もない所＝明るい＝白が出る）
-    const mask = ctx.register(ctx.stream(`q 1 1 1 rg ${box} Q q ${m.map(n4).join(' ')} cm /P Do Q q /B gs 0.4 0.4 0.4 rg ${box} Q`, {
-      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, W, H], Group: rgbGroup(), Resources: { XObject: { P: part }, ExtGState: { B: burn } }
+    const mask = ctx.register(ctx.stream(`q 1 1 1 rg ${box} Q q ${m.map(n4).join(' ')} cm /P Do Q q /G gs 0.5 0.5 0.5 rg ${box} Q q /B gs 0.25 0.25 0.25 rg ${box} Q`, {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, W, H], Group: rgbGroup(), Resources: { XObject: { P: part }, ExtGState: { G: satur, B: burn } }
     }));
     const sm = ctx.register(ctx.obj({ Type: 'ExtGState', SMask: { Type: 'Mask', S: 'Luminosity', G: mask } }));
     return ctx.register(ctx.stream(`q ${color.map(n4).join(' ')} rg ${box} Q q /M gs 1 1 1 rg ${box} Q`, {
@@ -1299,6 +1302,15 @@ function rasterOverlayPage(out, r) {
 
 /** 文書に画層（オプションコンテンツ）があるか */
 const hasLayers = (lib) => !!lib.catalog.get(PL.PDFName.of('OCProperties'));
+/** 画層の組み合わせ（OCMD）があるか。組み合わせ次第で全部の画層が表示でも隠れる中身があるので、画像で重ねる */
+function hasLayerMembership(lib) {
+  const { PDFDict, PDFName } = PL;
+  for (const [, obj] of lib.context.enumerateIndirectObjects()) {
+    const d = obj instanceof PDFDict ? obj : obj?.dict;
+    if (d instanceof PDFDict && d.get(PDFName.of('Type')) === PDFName.of('OCMD')) return true;
+  }
+  return false;
+}
 /** 画面に出すときに、隠れている画層が 1 つもないか（あると、線のまま重ねたとき隠れた線まで写るので画像で重ねる） */
 async function allLayersVisible(pdf) {
   try {
@@ -1324,7 +1336,8 @@ export async function compareOverlay({ files = null } = {}) {
   try {
     opened = await openOtherForCompare(files[0], (asking) => {
       // パスワードを聞く間は進み具合の窓を閉じ、聞いたあとに開き直す（その前に押した「中止」は覚えておく）
-      if (asking) { cancelledBeforeAsk = pr.cancelled; pr.close(); } else { pr = progress(title, 1); pr.status(0, t('比較するファイルを開いています')); }
+      if (asking) { cancelledBeforeAsk = pr.cancelled; pr.close(); return !cancelledBeforeAsk; }
+      pr = progress(title, 1); pr.status(0, t('比較するファイルを開いています'));
     });
   } catch (e) {
     pr.close();
@@ -1361,7 +1374,8 @@ export async function compareOverlay({ files = null } = {}) {
     const docReason = !libA ? 'lib-old' : !libB ? 'lib-new' : null;
     // 画層のある文書で、隠れている画層があれば画像で重ねる（線のままだと隠れた線まで写る）。全部表示なら線のままでよい
     let layerHidden = false;
-    if (libA && libB) layerHidden = (hasLayers(libA) && !(await allLayersVisible(state.pdf))) || (hasLayers(libB) && !(await allLayersVisible(other)));
+    const layersOk = async (lib, pdf) => !hasLayers(lib) || (!hasLayerMembership(lib) && await allLayersVisible(pdf));
+    if (libA && libB) layerHidden = !(await layersOk(libA, state.pdf)) || !(await layersOk(libB, other));
     if (layerHidden) { libA = null; libB = null; }
     // 素材（フォント・画像）を写す道具は、文書ごとに 1 つ（同じものを何度も写さない）
     const copierA = libA && libB ? PL.PDFObjectCopier.for(libA.context, out.context) : null;

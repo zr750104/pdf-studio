@@ -31,12 +31,14 @@ export function shrink(mask, w, h, f) {
 function samplePoints(mask, w, h, max = 60000) {
   let n = 0;
   for (let i = 0; i < mask.length; i++) n += mask[i];
-  const step = Math.max(1, Math.ceil(n / max));
   const pts = [];
-  let k = 0;
+  // 多すぎるときは、決まった乱数で間引く（走査の順に一定間隔で取ると、太い線の同じ側だけが残って位置がずれるため）
+  const keep = Math.min(1, max / Math.max(1, n));
+  let seed = 12345;
   for (let i = 0; i < mask.length; i++) {
     if (!mask[i]) continue;
-    if (k++ % step === 0) pts.push(i % w, (i / w) | 0);
+    if (keep < 1) { seed = (seed * 1103515245 + 12345) >>> 0; if (seed / 4294967296 >= keep) continue; }
+    pts.push(i % w, (i / w) | 0);
   }
   return pts;
 }
@@ -61,7 +63,8 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
   const maxDim = Math.max(aw, ah, bw, bh);
   // 粗い順に：大きい辺が約 200・約 1000 画素、そして実寸
   const levels = [...new Set([Math.ceil(maxDim / 200), Math.ceil(maxDim / 1000), 1])].sort((x, y) => y - x);
-  const better = (s, x, y, bs, bx, by) => s > bs || (s === bs && Math.abs(x) + Math.abs(y) < Math.abs(bx) + Math.abs(by));
+  const better = (s, x, y, bs, bx, by) => s > bs || (s === bs && (Math.abs(x) + Math.abs(y) < Math.abs(bx) + Math.abs(by) ||
+    (Math.abs(x) + Math.abs(y) === Math.abs(bx) + Math.abs(by) && (y < by || (y === by && x < bx)))));
   // 同じ間隔で並ぶ線（通り芯・格子など）では、粗い画像だと線 1 本ぶんずれた位置も同じくらい重なる。
   // そこで粗い段では候補を上位いくつか残し、細かい段でそれぞれを詰めて、いちばん重なるものを選ぶ
   const KEEP = 6;
@@ -96,7 +99,9 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
         }
       }
       peaks.sort((p, q) => (better(p.s, p.x, p.y, q.s, q.x, q.y) ? -1 : 1));
-      for (const p of peaks.slice(0, KEEP)) next.push({ dx: p.x * f, dy: p.y * f, s: p.s, bx: p.x, by: p.y });
+      // いちばん上の 7 割に満たない山は捨てる（細かい段で詰める手間を減らす）
+      const floor = peaks.length ? peaks[0].s * 0.7 : 0;
+      for (const p of peaks.slice(0, KEEP)) if (p.s >= floor) next.push({ dx: p.x * f, dy: p.y * f, s: p.s, bx: p.x, by: p.y });
     } else {
       // 次からは、候補ごとに前の段の 1 画素ぶん（＋1）の範囲だけ
       const R = Math.ceil(prevF / f) + 1;
