@@ -194,7 +194,7 @@ async function ensurePage(i) {
     const pdf = state.pdf;
     const page = await pdf.getPage(i + 1);
     if (pdf !== state.pdf || view.pages[i] !== p) return null;
-    if (setPageProxy(i, page)) { const a = captureAnchor(); applySizes(); restoreAnchor(a); }
+    if (setPageProxy(i, page)) { const a = captureAnchor(); applySizes(); restoreAnchor(a); scheduleUpdate(); }
   }
   return p.pdfPage;
 }
@@ -445,6 +445,7 @@ function updateVisible() {
     if (p.mounted && (i < k0 || i > k1)) unmountPage(p);
   }
   for (let i = r0; i <= r1; i++) mountPage(i);
+  snapPages();
   // スキャン画像のページは、進んでいる向きの先 8 ページを先に展開しておく
   if (scanAvailable()) {
     const ahead = [];
@@ -458,6 +459,28 @@ function updateVisible() {
   if (cur !== lastCurrent) {
     lastCurrent = cur;
     emit('page-changed', cur);
+  }
+}
+
+/**
+ * ページの左端を画面の画素の境目にそろえる。中央寄せで半端（0.5 画素）な位置になると、
+ * ページの絵が画面に出るときにぼかされて、文字がにじむ。上下はページの高さとすき間が整数なので、そろえるのは左右だけ
+ */
+function snapPages() {
+  const dpr = window.devicePixelRatio || 1;
+  // 先に全部の位置を読み、あとでまとめて書く（読み書きを交互にすると、そのたびに配置の計算が走る）
+  const moves = [];
+  for (const p of view.pages) {
+    if (!p.mounted) continue;
+    const now = p.snapX || 0;
+    // ずらす前の位置から、いちばん近い画素の境目までの差を求める（ずれが積み重ならないように）
+    const natural = p.div.getBoundingClientRect().left - now;
+    const want = Math.round(natural * dpr) / dpr - natural;
+    if (Math.abs(want - now) >= 0.01) moves.push([p, want]);
+  }
+  for (const [p, want] of moves) {
+    p.snapX = want;
+    p.div.style.left = Math.abs(want) < 0.01 ? '' : `${want}px`;
   }
 }
 
@@ -795,11 +818,14 @@ async function renderCanvas(i) {
   const dpr = window.devicePixelRatio || 1;
   // 見えている部分を細かく描くページ（大きな図面の拡大）は、ページ全体の画像を小さめにして速く描く
   const cap = detailWanted(i) && scanAvailable() && scanInfo(i)?.rotate === 0 ? DETAIL_BASE_PIXELS : MAX_CANVAS_PIXELS;
-  const outScale = Math.min(dpr, Math.sqrt(cap / Math.max(1, vp.width * vp.height)));
+  // 枠（ページの div）と同じ四捨五入で、画面上の大きさを求める。絵の画素数を枠とぴったり同じにして、
+  // 引き伸ばしでにじまないようにする（切り捨てだと 1 画素小さくなり、ページ全体がぼやけていた）
+  const boxW = Math.round(p.base.w * scale), boxH = Math.round(p.base.h * scale);
+  const outScale = Math.min(dpr, Math.sqrt(cap / Math.max(1, boxW * boxH)));
   const canvas = document.createElement('canvas');
   canvas.className = 'page-canvas';
-  canvas.width = Math.max(1, Math.floor(vp.width * outScale));
-  canvas.height = Math.max(1, Math.floor(vp.height * outScale));
+  canvas.width = Math.max(1, Math.round(boxW * outScale));
+  canvas.height = Math.max(1, Math.round(boxH * outScale));
   // スキャン画像だけのページは、ワーカーで縮めた画像を描く（pdf.js より大幅に速い）。失敗したら pdf.js で描く
   const scan = scanAvailable() ? scanInfo(i) : null;
   if (scan) {
@@ -820,10 +846,11 @@ async function renderCanvas(i) {
       return placeCanvas(i, p, gen, canvas, scale);
     }
   }
+  const sx = canvas.width / vp.width, sy = canvas.height / vp.height;
   const task = page.render({
     canvasContext: canvas.getContext('2d'),
     viewport: vp,
-    transform: outScale !== 1 ? [outScale, 0, 0, outScale, 0, 0] : null,
+    transform: sx !== 1 || sy !== 1 ? [sx, 0, 0, sy, 0, 0] : null,
     annotationMode: pdfjsLib.AnnotationMode.ENABLE
   });
   p.task = task;

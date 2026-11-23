@@ -1340,6 +1340,12 @@ ipcMain.handle('selftest', async (e, cmd, arg) => {
     parts.forEach((p, i) => fs.writeFileSync(path.join(d, `${arg}_pane${i}.png`), p.img.toPNG()));
     return true;
   }
+  if (cmd === 'capture') {
+    // 画面の一部を写して返す（ページの絵が画面にそのまま出ているか、画素で確かめるため）
+    const img = await entry.wc.capturePage(arg);
+    const sz = img.getSize();
+    return { w: sz.width, h: sz.height, data: img.toBitmap() };
+  }
   if (cmd === 'shot') {
     const img = await entry.wc.capturePage();
     const d = process.env.PDFSTUDIO_TEST_OUT || path.join(os.tmpdir(), 'pdfstudio-test');

@@ -40,6 +40,12 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.28 の変更点
+
+- ページの絵の画素数を、ページの枠（div）と同じ四捨五入で決める（viewer.js renderCanvas）。これまでは切り捨てで 1 画素小さく、CSS で引き伸ばされて全体がにじんでいた。pdf.js には縦横別の倍率（canvas の画素数 ÷ viewport）を渡す
+- ページの左端を画面の画素の境目にそろえる（viewer.js snapPages、表示中のページの style.left を 0.5 画素未満ずらす）。中央寄せで半端な位置になると、画面に出すときにぼかされていた。上下はページの高さとすき間が整数なのでそろえない（offsetTop を同じ行の判定に使っているため）
+- 自動テスト sharpTests：表示倍率 100%・125%・200%（`--force-device-scale-factor`）で、画面に写した画素がページの絵と完全に一致することを確かめる（修正前は差の平均 17）
+
 ## 1.5.27 の変更点
 
 - TIFF を開いて見ただけなら、閉じる・終了・自動更新のときに保存を確かめない（main.js needsAsk）。タブとタイトルの「●」も付けない。state.dirty は true のままなので「保存」はできる。編集したら確かめる

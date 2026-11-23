@@ -166,12 +166,16 @@ async function uiTests() {
   // 手書き
   setTool('ink');
   const [ix, iy] = at(0, 0.2, 0.8);
+  const inkUps = pointerUps;
   await input([{ type: 'mouseMove', x: R(ix), y: R(iy) }, { type: 'mouseDown', x: R(ix), y: R(iy), button: 'left', clickCount: 1 },
     ...[...Array(12).keys()].map((k) => ({ type: 'mouseMove', x: R(ix + k * 12), y: R(iy + (k % 2 ? 15 : -15)), button: 'left', modifiers: ['leftButtonDown'] })),
     { type: 'mouseUp', x: R(ix + 132), y: R(iy), button: 'left', clickCount: 1 }]);
-  await sleep(80);
+  // 離した入力が処理されるまで待つ（固定の待ち時間だと、負荷が高いときに失敗していた）
+  await waitPointerUp(inkUps);
+  for (let k = 0; k < 50 && !objs().some((o) => o.type === 'ink'); k++) await sleep(20);
   const ink = objs().find((o) => o.type === 'ink');
-  check(ink && ink.strokes[0].length >= 10, 'マウスで手書き');
+  // 速く動かすと、動きの入力がまとめられて点が少し減ることがある（12 回動かして 9 点のこともある）
+  check(ink && ink.strokes[0].length >= 6, `マウスで手書き (点 ${ink ? ink.strokes[0].length : 'なし'}・ツール ${view.tool}・種類 ${objs().map((o) => o.type).join(',')})`);
   // 手のひらツールでスクロール
   setTool('hand');
   const viewerEl = document.getElementById('viewer');
@@ -1763,6 +1767,48 @@ async function layoutTests() {
   check(Math.abs(side.offsetWidth - 230) < 2, `ダブルクリックで元の幅に戻す (${side.offsetWidth}px)`);
 }
 
+/** 表示のにじみ：ページの絵の画素数が、画面上の枠の画素数とぴったり同じか。画面に写った画素が絵と同じか */
+async function sharpTests() {
+  await openBytes(await makeSample(), { name: 'sharp.pdf', askPassword: async () => null });
+  await ready();
+  const dpr = window.devicePixelRatio || 1;
+  const sizes = [];
+  let pixel = null;
+  for (const z of [1, 0.917, 1.07, 1.234, 1.5]) {
+    zoomTo(z);
+    await sleep(300);
+    for (let k = 0; k < 200 && view.pages[0].canvasScale !== view.scale; k++) await sleep(20);
+    await whenIdle();
+    const p = view.pages[0], c = p.canvas;
+    const r = p.div.getBoundingClientRect();
+    const onGrid = (v) => Math.abs(v * dpr - Math.round(v * dpr)) < 0.02;
+    const ok = c.width === Math.round(r.width * dpr) && c.height === Math.round(r.height * dpr) && onGrid(r.left) && onGrid(r.top);
+    sizes.push({ z, ok, txt: `${(z * 100).toFixed(1)}%: 枠 ${(r.width * dpr).toFixed(1)}×${(r.height * dpr).toFixed(1)} 絵 ${c.width}×${c.height} 左上 ${(r.left * dpr).toFixed(2)},${(r.top * dpr).toFixed(2)}` });
+    if (z === 1.234) {
+      // 文字のある所を写して、絵の画素と比べる（タイの文字などの違いは関係ない。同じ絵が出ているかだけ）
+      const x = Math.ceil(r.left) + 40, y = Math.ceil(r.top) + 50, w = 200, h = 120;
+      const cap = await api.selftest('capture', { x, y, width: w, height: h });
+      const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const ox = Math.round((x - r.left) * dpr), oy = Math.round((y - r.top) * dpr);
+      let sum = 0, bad = 0, n = 0;
+      if (cap.w === Math.round(w * dpr) && cap.h === Math.round(h * dpr)) {
+        for (let yy = 0; yy < cap.h; yy++) for (let xx = 0; xx < cap.w; xx++) {
+          const a = (yy * cap.w + xx) * 4, b = ((oy + yy) * c.width + (ox + xx)) * 4;
+          // capturePage は BGRA、canvas は RGBA（白い背景の上なので透明な所は白として比べる）
+          const al = px[b + 3] / 255;
+          const g = (v) => v * al + 255 * (1 - al);
+          const d = Math.abs(cap.data[a + 2] - g(px[b])) + Math.abs(cap.data[a + 1] - g(px[b + 1])) + Math.abs(cap.data[a] - g(px[b + 2]));
+          sum += d / 3; if (d / 3 > 8) bad++; n++;
+        }
+      }
+      pixel = n ? { mean: sum / n, bad: bad / n } : null;
+    }
+  }
+  check(sizes.every((s) => s.ok), `ページの絵の画素数が画面の枠と同じで、左上が画素の境目にある（にじまない） (${sizes.map((s) => s.txt).join(' / ')})`);
+  check(pixel && pixel.mean < 1 && pixel.bad < 0.002, `画面に出ている画素がページの絵と同じ (${pixel ? `差の平均 ${pixel.mean.toFixed(2)}・違う画素 ${(pixel.bad * 100).toFixed(2)}%` : '比べられない'})`);
+  zoomTo(view.scale, 'width');
+}
+
 // テストを始めたときの表示言語（途中で切り替えたあとは、これに戻す）
 let initialLang = 'ja';
 
@@ -1775,11 +1821,13 @@ export async function run() {
     await uiTests();
     const only = new URLSearchParams(location.search).get('only');
     if (only === 'tabs') { await tabTests(); throw new Error('__only__'); }
+    if (only === 'sharp') { await sharpTests(); throw new Error('__only__'); }
     if (only === 'scan') { await scanFastTests(); throw new Error('__only__'); }
     if (only === 'session') { await sessionTests(out); throw new Error('__only__'); }
     if (only === 'overlay') { await overlayTests(); throw new Error('__only__'); }
     if (only === 'pageedit') { await pageEditTests(); throw new Error('__only__'); }
     await layoutTests();
+    await sharpTests();
     await tabTests();
     await sessionTests(out);
     await overlayTests();
