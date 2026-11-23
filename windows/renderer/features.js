@@ -1304,10 +1304,21 @@ function rasterOverlayPage(out, r) {
 const hasLayers = (lib) => !!lib.catalog.get(PL.PDFName.of('OCProperties'));
 /** 画層の組み合わせ（OCMD）があるか。組み合わせ次第で全部の画層が表示でも隠れる中身があるので、画像で重ねる */
 function hasLayerMembership(lib) {
-  const { PDFDict, PDFName } = PL;
+  const { PDFDict, PDFArray, PDFName } = PL;
+  const OCMD = PDFName.of('OCMD'), TYPE = PDFName.of('Type');
+  // 間接オブジェクトごとに、その中にじかに書かれた辞書・配列も奥までたどる（/Properties や /OC にじかに書かれた OCMD も見つける）。
+  // 参照の先は、それ自体が間接オブジェクトとして別に調べるので、たどらない
+  const walk = (o) => {
+    if (o instanceof PDFDict) {
+      if (o.get(TYPE) === OCMD) return true;
+      for (const [, v] of o.entries()) if (walk(v)) return true;
+    } else if (o instanceof PDFArray) {
+      for (const v of o.asArray()) if (walk(v)) return true;
+    }
+    return false;
+  };
   for (const [, obj] of lib.context.enumerateIndirectObjects()) {
-    const d = obj instanceof PDFDict ? obj : obj?.dict;
-    if (d instanceof PDFDict && d.get(PDFName.of('Type')) === PDFName.of('OCMD')) return true;
+    if (walk(obj instanceof PDFDict || obj instanceof PDFArray ? obj : obj?.dict)) return true;
   }
   return false;
 }

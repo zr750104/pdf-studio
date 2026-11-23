@@ -37,7 +37,8 @@ function samplePoints(mask, w, h, max = 60000) {
   let seed = 12345;
   for (let i = 0; i < mask.length; i++) {
     if (!mask[i]) continue;
-    if (keep < 1) { seed = (seed * 1103515245 + 12345) >>> 0; if (seed / 4294967296 >= keep) continue; }
+    // Math.imul で 32 ビットのまま掛ける（普通の掛け算だと桁あふれで下位のビットが落ち、すぐ同じ並びをくり返す）
+    if (keep < 1) { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; if (seed / 4294967296 >= keep) continue; }
     pts.push(i % w, (i / w) | 0);
   }
   return pts;
@@ -67,7 +68,7 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
     (Math.abs(x) + Math.abs(y) === Math.abs(bx) + Math.abs(by) && (y < by || (y === by && x < bx)))));
   // 同じ間隔で並ぶ線（通り芯・格子など）では、粗い画像だと線 1 本ぶんずれた位置も同じくらい重なる。
   // そこで粗い段では候補を上位いくつか残し、細かい段でそれぞれを詰めて、いちばん重なるものを選ぶ
-  const KEEP = 6;
+  const KEEP = 8;
   let cands = [{ dx: 0, dy: 0 }];
   let prevF = null, last = null;
   for (const f of levels) {
@@ -77,11 +78,16 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
     if (!pts.length) return { dx: 0, dy: 0, fx: 0, fy: 0 };
     const next = [];
     if (prevF == null) {
-      // 最初の段は広く探し、山（まわり 1 画素より高い所）を点数の順に上位 KEEP 個残す
+      // 最初の段は広く探し、山（まわり 1 画素より高い所）を点数の順に上位 KEEP 個残す。
+      // 正しいずれが粗い画素の境目にかかると、点数が隣どうしに半分ずつ割れて、格子の 1 本ずれた位置（境目にかからない）に負ける。
+      // そこで山は「その位置から右・下の 2×2 の合計」で比べ、その 2×2 の中でいちばん点数の高い位置を候補にする
       const R = Math.ceil((maxDim * maxFrac) / f) + 1;
       const side = 2 * R + 1;
+      const raw = new Int32Array(side * side);
+      for (let sy = -R; sy <= R; sy++) for (let sx = -R; sx <= R; sx++) raw[(sy + R) * side + (sx + R)] = score(pts, B.mask, B.w, B.h, sx, sy);
+      const at = (x, y) => (x < -R || x > R || y < -R || y > R ? 0 : raw[(y + R) * side + (x + R)]);
       const sc = new Int32Array(side * side);
-      for (let sy = -R; sy <= R; sy++) for (let sx = -R; sx <= R; sx++) sc[(sy + R) * side + (sx + R)] = score(pts, B.mask, B.w, B.h, sx, sy);
+      for (let sy = -R; sy <= R; sy++) for (let sx = -R; sx <= R; sx++) sc[(sy + R) * side + (sx + R)] = at(sx, sy) + at(sx + 1, sy) + at(sx, sy + 1) + at(sx + 1, sy + 1);
       const peaks = [];
       for (let sy = -R; sy <= R; sy++) {
         for (let sx = -R; sx <= R; sx++) {
@@ -95,13 +101,19 @@ export function findShift(a, aw, ah, b, bw, bh, maxFrac = 0.05) {
             // 同点の山は、動かない方に近いものだけを残す
             if (w > v || (w === v && Math.abs(xx) + Math.abs(yy) < Math.abs(sx) + Math.abs(sy))) { top = false; break; }
           }
-          if (top) peaks.push({ s: v, x: sx, y: sy });
+          if (!top) continue;
+          // 2×2 の中で、いちばん点数の高い位置（同点なら動かない方）
+          let bx = sx, by = sy;
+          for (const [qx, qy] of [[sx + 1, sy], [sx, sy + 1], [sx + 1, sy + 1]]) if (better(at(qx, qy), qx, qy, at(bx, by), bx, by)) { bx = qx; by = qy; }
+          // s：その位置そのものの点数（次の段・放物線の当てはめで使う）。sum：2×2 の合計（山を比べるため）
+          if (!peaks.some((p) => p.x === bx && p.y === by)) peaks.push({ s: at(bx, by), sum: v, x: bx, y: by });
         }
       }
-      peaks.sort((p, q) => (better(p.s, p.x, p.y, q.s, q.x, q.y) ? -1 : 1));
-      // いちばん上の 7 割に満たない山は捨てる（細かい段で詰める手間を減らす）
-      const floor = peaks.length ? peaks[0].s * 0.7 : 0;
-      for (const p of peaks.slice(0, KEEP)) if (p.s >= floor) next.push({ dx: p.x * f, dy: p.y * f, s: p.s, bx: p.x, by: p.y });
+      // 次に細かい段があれば 2×2 の合計で並べる。この段が最後（小さな画像で段が 1 つだけ）なら、その位置そのものの点数で並べる
+      const key = f === 1 ? 's' : 'sum';
+      peaks.sort((p, q) => (better(p[key], p.x, p.y, q[key], q.x, q.y) ? -1 : 1));
+      // 点数で足切りはしない（境目にかかった正しい山が低く出ることがあるため）
+      for (const p of peaks.slice(0, KEEP)) next.push({ dx: p.x * f, dy: p.y * f, s: p.s, bx: p.x, by: p.y });
     } else {
       // 次からは、候補ごとに前の段の 1 画素ぶん（＋1）の範囲だけ
       const R = Math.ceil(prevF / f) + 1;

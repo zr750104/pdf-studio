@@ -1655,18 +1655,19 @@ async function overlayTests() {
   }
 
   // 画層（オプションコンテンツ）のある図面：全部表示なら線のまま、隠れた画層があれば画像で重ねる
-  const layered = async (hidden) => {
+  const layered = async (hidden, ocmd = false) => {
     const d = await PL.PDFDocument.create();
     const ocg = d.context.register(d.context.obj({ Type: 'OCG', Name: PL.PDFString.of('L0') }));
     d.catalog.set(PL.PDFName.of('OCProperties'), d.context.obj({ OCGs: [ocg], D: { Order: [ocg], OFF: hidden ? [ocg] : [] } }));
     const p = d.addPage([842, 595]);
     p.drawLine({ start: { x: 50, y: 50 }, end: { x: 790, y: 50 }, thickness: 1 });
-    p.node.set(PL.PDFName.of('Resources'), d.context.obj({ Properties: { MC0: ocg } }));
+    // ocmd：画層の組み合わせ（OCMD）を /Properties にじかに書く（全部の画層が表示でも、組み合わせ次第で隠れる）
+    p.node.set(PL.PDFName.of('Resources'), d.context.obj({ Properties: { MC0: ocmd ? d.context.obj({ Type: 'OCMD', OCGs: [ocg], P: 'AllOff' }) : ocg } }));
     p.pushOperators(PL.PDFOperator.of('BDC', [PL.PDFName.of('OC'), PL.PDFName.of('MC0')]), PL.moveTo(100, 300), PL.lineTo(700, 300), PL.stroke(), PL.PDFOperator.of('EMC'));
     return d.save();
   };
-  const layerRun = async (hidden) => {
-    const bytesL = await layered(hidden);
+  const layerRun = async (hidden, ocmd = false) => {
+    const bytesL = await layered(hidden, ocmd);
     window.__lastOverlay = null;
     await openBytes(bytesL, { name: 'layer-old.pdf', askPassword: async () => null });
     await ready();
@@ -1676,8 +1677,8 @@ async function overlayTests() {
     for (const x of (await info()).tabs) if (x.id !== self) await tab({ do: 'force-close', id: x.id });
     return window.__lastOverlay?.vectorPages;
   };
-  const lv = await layerRun(false), lh = await layerRun(true);
-  check(lv === 1 && lh === 0, `重ねて比較：画層が全部表示なら線のまま、隠れた画層があれば画像で重ねる (全部表示 ${lv} / 隠れあり ${lh})`);
+  const lv = await layerRun(false), lh = await layerRun(true), lm = await layerRun(false, true);
+  check(lv === 1 && lh === 0 && lm === 0, `重ねて比較：画層が全部表示なら線のまま、隠れた画層・じかに書いた画層の組み合わせがあれば画像で重ねる (全部表示 ${lv} / 隠れあり ${lh} / 組み合わせ ${lm})`);
 
   // 大きな図面（A0・線 3000 本）でも、比べている間に画面が長く止まらない（進み具合と「中止」が動く）
   const big = async (extra) => {
