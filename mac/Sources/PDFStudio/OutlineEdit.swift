@@ -136,7 +136,8 @@ enum OutlineEdit {
     /// 名前を変える（取り消すと元の名前に戻る）
     static func rename(_ o: PDFOutline, to label: String, in doc: PDFStudioDocument) {
         let old = o.label ?? ""
-        guard old != label, let now = path(of: o) else { o.label = label; Compositor.markOutlineEdited(doc.pdf); return }
+        guard old != label else { return }
+        guard let now = path(of: o) else { o.label = label; Compositor.markOutlineEdited(doc.pdf); return }
         o.label = label
         register(doc, "しおりの名前を変更") { d in if let x = resolve(now, in: d) { rename(x, to: old, in: d) } }
     }

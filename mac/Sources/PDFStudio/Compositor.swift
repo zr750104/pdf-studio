@@ -50,21 +50,92 @@ enum Compositor {
     }
     static func outlineEdited(_ doc: PDFDocument) -> Bool { (objc_getAssociatedObject(doc, &outlineEditedKey) as? Bool) ?? false }
 
-    /// ページを差し替え、しおりのリンク先も新しいページへ付け替える
-    static func replacePage(in doc: PDFDocument, at index: Int, with newPage: PDFPage) {
-        guard let old = doc.page(at: index) else { return }
-        doc.removePage(at: index)
-        doc.insert(newPage, at: index)
-        if let root = doc.outlineRoot { remap(root, from: old, to: newPage); markOutlineEdited(doc) }
+    /// リンク・しおりの移動先を、ページの番号で控えたもの。
+    /// 読み込んだ文書では、ページを外すとそのページを指す移動先のページが消える（nil になる）ので、外す前に控えておく
+    struct DestinationRecord {
+        let index: Int
+        let point: CGPoint
+        let zoom: CGFloat
+        let isOutline: Bool
+        let set: (PDFDestination) -> Void
     }
 
-    private static func remap(_ outline: PDFOutline, from old: PDFPage, to new: PDFPage) {
-        if let d = outline.destination, d.page === old {
-            outline.destination = PDFDestination(page: new, at: d.point)
+    static func recordDestinations(_ doc: PDFDocument, extraPages: [PDFPage] = []) -> [DestinationRecord] {
+        var out: [DestinationRecord] = []
+        func add(_ d: PDFDestination?, outline: Bool = false, _ set: @escaping (PDFDestination) -> Void) {
+            guard let d, let page = d.page else { return }
+            let i = doc.index(for: page)
+            guard i != NSNotFound else { return }
+            out.append(DestinationRecord(index: i, point: d.point, zoom: d.zoom, isOutline: outline, set: set))
         }
-        for i in 0..<outline.numberOfChildren {
-            if let c = outline.child(at: i) { remap(c, from: old, to: new) }
+        // 文書のページのリンクと、まだ文書に入っていないページ（差し替える新しいページ）のリンク
+        let extra = extraPages.flatMap { $0.annotations }
+        for a in (0..<doc.pageCount).flatMap({ doc.page(at: $0)?.annotations ?? [] }) + extra where a.type == "Link" {
+            add(a.destination ?? (a.action as? PDFActionGoTo)?.destination) { nd in
+                if a.destination != nil { a.destination = nd }
+                if a.action is PDFActionGoTo || a.destination == nil { a.action = PDFActionGoTo(destination: nd) }
+            }
         }
+        func walk(_ o: PDFOutline) {
+            add(o.destination ?? (o.action as? PDFActionGoTo)?.destination, outline: true) { nd in
+                o.destination = nd
+                if o.action is PDFActionGoTo { o.action = PDFActionGoTo(destination: nd) }
+            }
+            for k in 0..<o.numberOfChildren { if let c = o.child(at: k) { walk(c) } }
+        }
+        if let root = doc.outlineRoot { walk(root) }
+        return out
+    }
+
+    /// 控えた移動先のうち、差し替えたページを指すものを新しいページと位置に直す（transform：元のページの点 → 新しいページの点）
+    static func restoreDestinations(_ records: [DestinationRecord], in doc: PDFDocument, transforms: [Int: CGAffineTransform]) {
+        let unspecified = kPDFDestinationUnspecifiedValue
+        var outlineFixed = false
+        for r in records {
+            guard let t = transforms[r.index], let page = doc.page(at: r.index) else { continue }
+            // 位置が変わるときだけ印が要る（同じ位置のままなら、PDFKit の普通の保存でしおりは正しく残る）
+            if r.isOutline && !t.isIdentity { outlineFixed = true }
+            let p = r.point
+            let q = CGPoint(x: p.x == unspecified ? 0 : p.x, y: p.y == unspecified ? 0 : p.y).applying(t)
+            let nd = PDFDestination(page: page, at: CGPoint(x: p.x == unspecified ? unspecified : q.x, y: p.y == unspecified ? unspecified : q.y))
+            nd.zoom = r.zoom
+            r.set(nd)
+        }
+        // しおりの位置を実際に変えたときだけ印を付ける（印があると保存が複製の経路になり、フォームなどが失われる）
+        if outlineFixed { markOutlineEdited(doc) }
+    }
+
+    /// ページを並べ替える（rows のページを row の前へ）。外して入れ直すと移動先のページが消えるので、
+    /// 外す前に控えて、同じページへ付け直す（位置は変わらないので、しおりを変えた印は付けない）
+    /// 戻り値：動かしたページの新しい先頭の位置
+    @discardableResult
+    static func movePages(in doc: PDFDocument, rows: [Int], to row: Int) -> Int {
+        let rows = rows.sorted()
+        let moved = Set(rows)
+        var pagesByIndex: [Int: PDFPage] = [:]
+        for r in rows { pagesByIndex[r] = doc.page(at: r) }
+        let records = recordDestinations(doc).filter { moved.contains($0.index) }
+        let pages = rows.compactMap { doc.page(at: $0) }
+        for r in rows.reversed() { doc.removePage(at: r) }
+        let target = row - rows.filter { $0 < row }.count
+        for (k, p) in pages.enumerated() { doc.insert(p, at: target + k) }
+        for rec in records {
+            guard let page = pagesByIndex[rec.index], doc.index(for: page) != NSNotFound else { continue }
+            let nd = PDFDestination(page: page, at: rec.point)
+            nd.zoom = rec.zoom
+            rec.set(nd)
+        }
+        return target
+    }
+
+    /// ページを差し替え、リンクとしおりの移動先も新しいページへ付け替える
+    static func replacePage(in doc: PDFDocument, at index: Int, with newPage: PDFPage) {
+        guard doc.page(at: index) != nil else { return }
+        // 新しいページへ先に移された注釈（同じページを指すリンク）も、外す前に控える
+        let records = recordDestinations(doc, extraPages: [newPage]).filter { $0.index == index }
+        doc.removePage(at: index)
+        doc.insert(newPage, at: index)
+        restoreDestinations(records, in: doc, transforms: [index: .identity])
     }
 
     /// 保存用データを作る。画像スタンプはページ内容に焼き込み、その他の注釈は注釈のまま残す。
@@ -102,7 +173,7 @@ enum Compositor {
             target = out
         }
         let hasImageStamps = (0..<target.pageCount).contains { i in target.page(at: i)?.annotations.contains(where: ImageStamp.isImageStamp) ?? false }
-        let edited = outlineEdited(doc)
+        let edited = outlineEdited(doc) || outlineEdited(target)
         if hasImageStamps || edited {
             let out = PDFDocument()
             var map: [ObjectIdentifier: PDFPage] = [:]
@@ -114,7 +185,18 @@ enum Compositor {
                 if let dp = doc.page(at: i) { map[ObjectIdentifier(dp)] = c }
             }
             out.documentAttributes = target.documentAttributes
-            if let root = edited ? doc.outlineRoot : target.outlineRoot { out.outlineRoot = copyOutline(root, map) }
+            if let root = outlineEdited(doc) ? doc.outlineRoot : target.outlineRoot { out.outlineRoot = copyOutline(root, map) }
+            // 複製したページのリンクは、元の文書のページを指したままなので、複製したページへ付け替える
+            for i in 0..<out.pageCount {
+                for a in out.page(at: i)?.annotations ?? [] where a.type == "Link" {
+                    guard let d = a.destination ?? (a.action as? PDFActionGoTo)?.destination, let pg = d.page,
+                          let np = map[ObjectIdentifier(pg)], np !== pg else { continue }
+                    let nd = PDFDestination(page: np, at: d.point)
+                    nd.zoom = d.zoom
+                    if a.destination != nil { a.destination = nd }
+                    if a.action is PDFActionGoTo || a.destination == nil { a.action = PDFActionGoTo(destination: nd) }
+                }
+            }
             target = out
         }
         return write(target, options: options)
@@ -136,9 +218,11 @@ enum Compositor {
         n.label = o.label
         n.isOpen = o.isOpen
         if let d = o.destination, let p = d.page, let np = map[ObjectIdentifier(p)] {
-            n.destination = PDFDestination(page: np, at: d.point)
-        } else if let a = o.action as? PDFActionURL {
-            n.action = a
+            let nd = PDFDestination(page: np, at: d.point)
+            nd.zoom = d.zoom
+            n.destination = nd
+        } else if let a = o.action, !(a is PDFActionGoTo) {
+            n.action = a   // ほかのファイルへの移動・URL・名前付きの操作などはそのまま
         }
         for i in 0..<o.numberOfChildren {
             if let c = o.child(at: i) { n.insertChild(copyOutline(c, map), at: n.numberOfChildren) }

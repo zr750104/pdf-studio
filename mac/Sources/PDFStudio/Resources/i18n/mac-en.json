@@ -268,7 +268,10 @@
   "大きさを変えるページはありませんでした": "No pages needed resizing",
   "文書の作成者が変更を許可していません。": "The author of this document does not allow changes.",
   "用紙": "Paper",
-  "縦横の向きはページごとに元のまま、縦横比を保って中央に収めます。注釈やリンクも一緒に動かします。": "Each page keeps its orientation and is scaled to fit and centered, keeping its aspect ratio. Annotations and links move with it."
+  "縦横の向きはページごとに元のまま、縦横比を保って中央に収めます。注釈やリンクも一緒に動かします。": "Each page keeps its orientation and is scaled to fit and centered, keeping its aspect ratio. Annotations and links move with it.",
+  "この PDF にはフォームの欄またはページラベル（i, ii などのページ番号の表記）があります。しおりを変えて保存すると、ほかのアプリでのフォームの入力やページラベルが使えなくなることがあります。気になる場合は、別名で保存してください。": "This PDF has form fields or page labels (page numbering such as i, ii). If you change bookmarks and save, form filling or page labels may no longer work in other apps. If this matters, save under a different name.",
+  "この PDF にはフォームの欄またはページラベル（i, ii などのページ番号の表記）があります。しおりを変えて保存すると、フォームの入力やページラベルのほか、添付ファイル・言語の設定・タグ付きの構造などの文書全体の情報が失われることがあります。気になる場合は、別名で保存してください。": "This PDF has form fields or page labels (page numbering such as i, ii). If you change bookmarks and save, form filling, page labels and other document-wide information such as attachments, language settings and tagged structure may be lost. If this matters, save under a different name.",
+  "しおりの移動先も直したため、保存すると、ほかのアプリでのフォームの入力やページラベルが使えなくなることがあります。気になる場合は、別名で保存してください。": "Because bookmark destinations were also adjusted, saving may stop form filling or page labels from working in other apps. If this matters, save under a different name."
  },
  "patterns": [
   [

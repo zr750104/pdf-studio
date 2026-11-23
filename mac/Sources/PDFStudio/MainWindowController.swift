@@ -452,6 +452,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         var notes = [L("{n} ページの大きさを {s} にそろえました").replacingOccurrences(of: "{n}", with: "\(result.changed)").replacingOccurrences(of: "{s}", with: paper.name)]
         if hadMeasure { notes.append(L("これまでの測定の注釈は実寸のまま直しました。これから測るときは、大きさを変えたページで縮尺を合わせ直してください。")) }
         if result.forms { notes.append(L("フォームの入力欄の位置は動かしましたが、文字の大きさは変えていません。")) }
+        // しおりの移動先を直した文書は、保存のときにページを複製するので、フォームの設定などが失われる
+        if Compositor.outlineEdited(studio.pdf) && Compositor.hasFormOrPageLabels(studio.pdf) {
+            notes.append(L("しおりの移動先も直したため、保存すると、ほかのアプリでのフォームの入力やページラベルが使えなくなることがあります。気になる場合は、別名で保存してください。"))
+        }
         Dialog.alert("ページの大きさをそろえました", notes.joined(separator: "\n\n"))
     }
 

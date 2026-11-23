@@ -460,10 +460,13 @@ enum SelfTest {
         let root = PDFOutline(); doc.outlineRoot = root
         let ol = PDFOutline(); ol.label = "3 ページ"; ol.destination = PDFDestination(page: p2, at: CGPoint(x: 120, y: 600)); root.insertChild(ol, at: 0)
 
+        // ファイルを開いてからそろえるのと同じく、保存して読み込んだ文書で試す
+        guard let fileDoc = Compositor.serialize(doc).flatMap(PDFDocument.init(data:)), fileDoc.pageCount == 3,
+              let f0 = fileDoc.page(at: 0), let f2 = fileDoc.page(at: 2) else { check(false, "大きさ：読み込んだ文書の準備"); return }
         let a4 = PageSize.papers[1].size
-        guard let t0 = PageSize.plan(p0, paper: a4, onlyShrink: false), let t2 = PageSize.plan(p2, paper: a4, onlyShrink: false) else { check(false, "大きさ：計画"); return }
+        guard let t0 = PageSize.plan(f0, paper: a4, onlyShrink: false), let t2 = PageSize.plan(f2, paper: a4, onlyShrink: false) else { check(false, "大きさ：計画"); return }
         let s = t0.scale
-        let r = PageSize.normalize(doc, pages: [0, 1, 2], paper: a4, onlyShrink: false)
+        let r = PageSize.normalize(fileDoc, pages: [0, 1, 2], paper: a4, onlyShrink: false)
         func near(_ a: CGFloat, _ b: CGFloat, _ tol: CGFloat = 1.5) -> Bool { abs(a - b) <= tol }
         func nearRect(_ a: CGRect, _ b: CGRect) -> Bool { near(a.minX, b.minX) && near(a.minY, b.minY) && near(a.width, b.width) && near(a.height, b.height) }
         func nearPt(_ a: CGPoint, _ b: CGPoint) -> Bool { near(a.x, b.x) && near(a.y, b.y) }
@@ -479,8 +482,8 @@ enum SelfTest {
             return d[y * Int(size.width) + x] < 128
         }
         // 保存して開き直す
-        let saved = Compositor.serialize(doc).flatMap(PDFDocument.init(data:))
-        for (label, d) in [("そろえた直後", doc), ("保存して開き直したあと", saved)] {
+        let saved = Compositor.serialize(fileDoc).flatMap(PDFDocument.init(data:))
+        for (label, d) in [("そろえた直後", fileDoc), ("保存して開き直したあと", saved)] {
             guard let d, d.pageCount == 3, let q0 = d.page(at: 0), let q1 = d.page(at: 1), let q2 = d.page(at: 2) else { check(false, "大きさ：\(label)の文書"); continue }
             var bad: [String] = []
             let m0 = q0.bounds(for: .mediaBox).size, m1 = q1.bounds(for: .mediaBox).size, m2 = q2.bounds(for: .cropBox)
@@ -512,7 +515,7 @@ enum SelfTest {
             } else { bad.append("測定がない") }
             // 画像スタンプ：直後は注釈、保存後は内容に焼き込まれる。どちらも新しい位置に見える
             let stampCenter = CGPoint(x: stampRect.midX, y: stampRect.minY + 8).applying(t0.transform)
-            if d === doc {
+            if d === fileDoc {
                 if let st = ann.first(where: { ImageStamp.isImageStamp($0) }) { if !nearRect(st.bounds, stampRect.applying(t0.transform)) { bad.append("スタンプ \(st.bounds)") } } else { bad.append("スタンプがない") }
             } else if !dark(q0, at: stampCenter) && !(q0.annotations.contains { ImageStamp.isImageStamp($0) }) { bad.append("保存後のスタンプ") }
             if let lk = ann.first(where: { $0.type == "Link" }), let dest = lk.destination ?? (lk.action as? PDFActionGoTo)?.destination, let dp = dest.page {
@@ -525,6 +528,62 @@ enum SelfTest {
         }
         if let png = saved?.page(at: 0)?.thumbnail(of: NSSize(width: 600, height: 850), for: .mediaBox).tiffRepresentation {
             try? NSBitmapImageRep(data: png)?.representation(using: .png, properties: [:])?.write(to: outDir.appendingPathComponent("pagesize-result.png"))
+        }
+        // ページの差し替え（墨消し・フラット化と同じ）：読み込んだしおり付きの文書でも、保存後のしおりが新しいページを指す
+        do {
+            let od = PDFDocument()
+            for i in 0..<2 { if let p = Operations.blankPage() { od.insert(p, at: i) } }
+            let rt = PDFOutline(); od.outlineRoot = rt
+            for i in 0..<2 { let o = PDFOutline(); o.label = "p\(i + 1)"; o.destination = PDFDestination(page: od.page(at: i)!, at: CGPoint(x: 0, y: 500)); rt.insertChild(o, at: i) }
+            if let ld = od.dataRepresentation().flatMap(PDFDocument.init(data:)), let lp = ld.page(at: 0), let np = Compositor.rebuild(lp, overlay: { _, _ in }) {
+                Compositor.replacePage(in: ld, at: 0, with: np)
+                let markedAfterReplace = Compositor.outlineEdited(ld)
+                let re = Compositor.serialize(ld).flatMap(PDFDocument.init(data:))
+                let pages = (0..<(re?.outlineRoot?.numberOfChildren ?? 0)).compactMap { i in re?.outlineRoot?.child(at: i)?.destination?.page.map { re!.index(for: $0) } }
+                check(pages == [0, 1] && !markedAfterReplace, "ページを差し替えても（墨消し・フラット化）、印は付かず（フォームなどを失わない）、保存後のしおりが正しいページを指す (\(pages), 印 \(markedAfterReplace))")
+            } else { check(false, "ページの差し替え：準備") }
+        }
+        // しおりを変えた文書でページを並べ替えても、動かしたページを指すしおりとリンクが保存に残る
+        do {
+            let base = PDFDocument()
+            for i in 0..<3 { if let p = Operations.blankPage() { base.insert(p, at: i) } }
+            let rt = PDFOutline(); base.outlineRoot = rt
+            for i in 0..<3 { let o = PDFOutline(); o.label = "p\(i + 1)"; o.destination = PDFDestination(page: base.page(at: i)!, at: CGPoint(x: 0, y: 500)); rt.insertChild(o, at: i) }
+            let lk = PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 50, height: 20), forType: .link, withProperties: nil)
+            lk.destination = PDFDestination(page: base.page(at: 2)!, at: CGPoint(x: 0, y: 300)); base.page(at: 0)?.addAnnotation(lk)
+            if let fd = base.dataRepresentation().flatMap(PDFDocument.init(data:)), let o0 = fd.outlineRoot?.child(at: 0) {
+                let sd = PDFStudioDocument.makeNew(fd, title: "move.pdf", edited: false)
+                OutlineEdit.rename(o0, to: "最初", in: sd)   // しおりを変えた印が付く
+                Compositor.movePages(in: fd, rows: [2], to: 0)   // 3 ページ目を先頭へ
+                let re = Compositor.serialize(fd).flatMap(PDFDocument.init(data:))
+                let ol = (0..<(re?.outlineRoot?.numberOfChildren ?? 0)).map { i in re?.outlineRoot?.child(at: i)?.destination?.page.map { re!.index(for: $0) } ?? -1 }
+                let la = re?.page(at: 1)?.annotations.first { $0.type == "Link" }
+                let lt = (la?.destination ?? (la?.action as? PDFActionGoTo)?.destination)?.page.map { re!.index(for: $0) } ?? -1
+                check(ol == [1, 2, 0] && lt == 0 && re?.outlineRoot?.child(at: 0)?.label == "最初",
+                      "しおりを変えた文書でページを並べ替えても、しおりとリンクの移動先が保存に残る (しおり \(ol), リンク → \(lt))")
+            } else { check(false, "並べ替え：準備") }
+        }
+        // しおりのない、リンクだけの文書：差し替えても印は付かず、同じページ・ほかのページへのリンクの移動先が保存に残る
+        do {
+            // 読み込んだ文書にリンクを置くと保存で移動先が消える（PDFKit の制限・別の不具合）ので、作った文書でリンクを置いてから読み込む
+            let base = PDFDocument()
+            for i in 0..<3 { if let p = Operations.blankPage() { base.insert(p, at: i) } }
+            let l1 = PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 50, height: 20), forType: .link, withProperties: nil)
+            l1.destination = PDFDestination(page: base.page(at: 1)!, at: CGPoint(x: 0, y: 300)); base.page(at: 0)?.addAnnotation(l1)
+            let l2 = PDFAnnotation(bounds: CGRect(x: 10, y: 40, width: 50, height: 20), forType: .link, withProperties: nil)
+            l2.destination = PDFDestination(page: base.page(at: 1)!, at: CGPoint(x: 0, y: 200)); base.page(at: 1)?.addAnnotation(l2)
+            if let fd = base.dataRepresentation().flatMap(PDFDocument.init(data:)), let p1 = fd.page(at: 1), let np = Compositor.rebuild(p1, overlay: { _, _ in }) {
+                Compositor.replacePage(in: fd, at: 1, with: np)
+                let marked = Compositor.outlineEdited(fd)
+                let re = Compositor.serialize(fd).flatMap(PDFDocument.init(data:))
+                func target(_ page: Int) -> Int? {
+                    let a = re?.page(at: page)?.annotations.first { $0.type == "Link" }
+                    let d = a?.destination ?? (a?.action as? PDFActionGoTo)?.destination
+                    return d?.page.map { re!.index(for: $0) }
+                }
+                check(!marked && target(0) == 1 && target(1) == 1,
+                      "リンクだけの文書でページを差し替えても、印は付かず、リンク先が保存に残る (印 \(marked), 1 ページ目 → \(String(describing: target(0))), 2 ページ目 → \(String(describing: target(1))))")
+            } else { check(false, "リンクだけの文書：準備") }
         }
         // ポップアップの付いた付箋：そろえて保存しても、ポップアップは 1 つで、新しい位置にある
         do {

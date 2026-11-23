@@ -92,8 +92,9 @@ enum PageSize {
     @discardableResult
     static func normalize(_ doc: PDFDocument, pages: [Int], paper: CGSize, onlyShrink: Bool) -> Result {
         var result = Result()
-        // 元のページ → (新しいページ, 変換)。リンクとしおりの移動先を直すのに使う
-        var moved: [ObjectIdentifier: (page: PDFPage, t: CGAffineTransform)] = [:]
+        // リンクとしおりの移動先は、ページを外す前にページの番号で控える
+        let records = Compositor.recordDestinations(doc)
+        var transforms: [Int: CGAffineTransform] = [:]
         // 元のページは最後まで持っておく（解放されると、後から作るページと同じ番号になることがある）
         var originals: [PDFPage] = []
         for i in pages {
@@ -138,35 +139,15 @@ enum PageSize {
                 let label = m.label ?? PDFAnnotation(bounds: CGRect(x: 0, y: 0, width: 1, height: 1), forType: .freeText, withProperties: nil)
                 Measure.apply(kind: m.data.kind, points: pts, scale: sc, shape: m.shape, label: label)
             }
-            moved[ObjectIdentifier(page)] = (np, plan.transform)
+            transforms[i] = plan.transform
             originals.append(page)
             doc.removePage(at: i)
             doc.insert(np, at: i)
             result.changed += 1
         }
-        guard !moved.isEmpty else { return result }
+        guard !transforms.isEmpty else { return result }
         // 移動先（リンク・しおり）を新しいページと位置に直す
-        func fix(_ d: PDFDestination?) -> PDFDestination? {
-            guard let d, let page = d.page, let m = moved[ObjectIdentifier(page)] else { return nil }
-            let unspecified = kPDFDestinationUnspecifiedValue
-            let p = d.point
-            let q = CGPoint(x: p.x == unspecified ? 0 : p.x, y: p.y == unspecified ? 0 : p.y).applying(m.t)
-            let nd = PDFDestination(page: m.page, at: CGPoint(x: p.x == unspecified ? unspecified : q.x, y: p.y == unspecified ? unspecified : q.y))
-            nd.zoom = d.zoom
-            return nd
-        }
-        for i in 0..<doc.pageCount {
-            for a in doc.page(at: i)?.annotations ?? [] where a.type == "Link" {
-                if let nd = fix(a.destination) { a.destination = nd }
-                if let go = a.action as? PDFActionGoTo, let nd = fix(go.destination) { a.action = PDFActionGoTo(destination: nd) }
-            }
-        }
-        func walk(_ o: PDFOutline) {
-            if let nd = fix(o.destination) { o.destination = nd }
-            if let go = o.action as? PDFActionGoTo, let nd = fix(go.destination) { o.action = PDFActionGoTo(destination: nd) }
-            for k in 0..<o.numberOfChildren { if let c = o.child(at: k) { walk(c) } }
-        }
-        if let root = doc.outlineRoot { walk(root); Compositor.markOutlineEdited(doc) }
+        Compositor.restoreDestinations(records, in: doc, transforms: transforms)
         withExtendedLifetime(originals) {}
         return result
     }

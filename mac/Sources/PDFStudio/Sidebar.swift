@@ -210,10 +210,7 @@ final class PagesPanel: SidebarPanel, NSTableViewDataSource, NSTableViewDelegate
             let rows = items.compactMap { $0.string(forType: .pageIndex).flatMap(Int.init) }.sorted()
             guard !rows.isEmpty else { return false }
             studio.performStructuralChange("ページの移動") { pdf in
-                let pages = rows.compactMap { pdf.page(at: $0) }
-                for r in rows.reversed() { pdf.removePage(at: r) }
-                let target = row - rows.filter { $0 < row }.count
-                for (k, p) in pages.enumerated() { pdf.insert(p, at: target + k) }
+                Compositor.movePages(in: pdf, rows: rows, to: row)
             }
             table.selectRowIndexes(IndexSet(integersIn: (row - rows.filter { $0 < row }.count)..<(row - rows.filter { $0 < row }.count + rows.count)), byExtendingSelection: false)
             return true
@@ -410,7 +407,7 @@ final class OutlinePanel: SidebarPanel, NSOutlineViewDataSource, NSOutlineViewDe
     private func warnFormLoss() {
         guard !warnedFormLoss, let doc = studio?.pdf, Compositor.hasFormOrPageLabels(doc) else { return }
         warnedFormLoss = true
-        Dialog.alert("フォーム・ページラベルについて", "この PDF にはフォームの欄またはページラベル（i, ii などのページ番号の表記）があります。しおりを変えて保存すると、ほかのアプリでのフォームの入力やページラベルが使えなくなることがあります。気になる場合は、別名で保存してください。")
+        Dialog.alert("フォーム・ページラベルについて", "この PDF にはフォームの欄またはページラベル（i, ii などのページ番号の表記）があります。しおりを変えて保存すると、フォームの入力やページラベルのほか、添付ファイル・言語の設定・タグ付きの構造などの文書全体の情報が失われることがあります。気になる場合は、別名で保存してください。")
     }
 
     private var selected: PDFOutline? { outlineView.item(atRow: outlineView.selectedRow) as? PDFOutline }
