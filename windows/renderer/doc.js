@@ -121,6 +121,7 @@ function scaleObject(o, k, tx, ty) {
   if (typeof o.width === 'number') c.width = o.width * k;
   if (typeof o.fontSize === 'number') c.fontSize = o.fontSize * k;
   if (o.scale && typeof o.scale.factor === 'number') c.scale = { ...o.scale, factor: o.scale.factor / k };
+  if (Array.isArray(o.labelOffset)) c.labelOffset = [o.labelOffset[0] * k, o.labelOffset[1] * k];
   return c;
 }
 
@@ -728,6 +729,7 @@ export function cloneObject(o) {
   if (o.points) c.points = o.points.map((p) => [...p]);
   if (o.strokes) c.strokes = o.strokes.map((s) => s.map((p) => [...p]));
   if (o.quads) c.quads = o.quads.map((q) => [...q]);
+  if (o.labelOffset) c.labelOffset = [...o.labelOffset];
   return c;
 }
 
@@ -766,6 +768,8 @@ export function rotateObjectBy(o, deg) {
   const rot = ([px, py]) => [cx + (px - cx) * c - (py - cy) * s, cy + (px - cx) * s + (py - cy) * c];
   let pts;
   if (o.points) { o.points = o.points.map(rot); pts = o.points; }
+  // 測定の数値を動かした量も、同じだけ回す（向きだけ。中心はない）
+  if (Array.isArray(o.labelOffset)) o.labelOffset = [o.labelOffset[0] * c - o.labelOffset[1] * s, o.labelOffset[0] * s + o.labelOffset[1] * c];
   if (o.strokes) { o.strokes = o.strokes.map((st) => st.map(rot)); pts = o.strokes.flat(); }
   if (o.type === 'measure') { o.rect = measureBounds(o); return; }
   const pad = o.type === 'ink' ? (o.width ?? 1) : 0;
@@ -834,7 +838,9 @@ export function measureLabel(o) {
   } else {
     c = [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2];
   }
-  return { text, cx: c[0], cy: c[1], w, h, angle: o.labelAngle || 0 };
+  // 利用者が数値を動かした量（PDF 座標。もとの位置からのずれ）
+  const off = Array.isArray(o.labelOffset) ? o.labelOffset : [0, 0];
+  return { text, cx: c[0] + off[0], cy: c[1] + off[1], w, h, angle: o.labelAngle || 0 };
 }
 
 function measureBounds(o) {

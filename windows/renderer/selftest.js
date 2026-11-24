@@ -4,7 +4,7 @@ import {
   rotatePages, insertBlank, duplicatePages, can, beginGesture, endGesture, findObject, measureValue, refreshFromLib, setDirty,
   readOutline, editOutline, normalizePageSize, PAPER_SIZES
 } from './doc.js';
-import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, clampScale, MAX_SCALE, MIN_SCALE, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation } from './viewer.js';
+import { view, setDetailThreshold, addObject, removeObject, setTool, buildPages, scrollToPage, currentPage, stepPage, setLayout, subRange, whenIdle, zoomTo, clampScale, MAX_SCALE, MIN_SCALE, renderStats, placeImage, select, rotateSelected, selectedDisplayAngle, pageRotation, polyActive } from './viewer.js';
 import { textStamp, hanko, chooseStamp } from './stamps.js';
 import * as F from './features.js';
 import { runBatch, batchProcess } from './batch.js';
@@ -98,6 +98,15 @@ async function click(x, y) {
   await input([{ type: 'mouseMove', x: R(x), y: R(y) }, { type: 'mouseDown', x: R(x), y: R(y), button: 'left', clickCount: 1 }, { type: 'mouseUp', x: R(x), y: R(y), button: 'left', clickCount: 1 }]);
   await waitPointerUp(before);
   await sleep(50);
+}
+/** ダブルクリック（実際のマウスと同じく、1 回目と 2 回目のクリックを続けて送る） */
+async function dblclick(x, y) {
+  const before = pointerUps;
+  await input([{ type: 'mouseMove', x: R(x), y: R(y) },
+    { type: 'mouseDown', x: R(x), y: R(y), button: 'left', clickCount: 1 }, { type: 'mouseUp', x: R(x), y: R(y), button: 'left', clickCount: 1 },
+    { type: 'mouseDown', x: R(x), y: R(y), button: 'left', clickCount: 2 }, { type: 'mouseUp', x: R(x), y: R(y), button: 'left', clickCount: 2 }]);
+  await waitPointerUp(before + 1);
+  await sleep(80);
 }
 async function key(keyCode) {
   await input([{ type: 'keyDown', keyCode }, { type: 'char', keyCode }, { type: 'keyUp', keyCode }]);
@@ -297,6 +306,27 @@ async function measureTests() {
   check(view.scale === scaleBefore, '操作の途中で倍率が変わらない（スクロールバーの出入りで合わせ直さない）');
   const expectMm = ((x2 - x1) / view.scale) * 25.4 / 72;
   check(dist && dist.kind === 'distance' && Math.abs(measureValue(dist).value - expectMm) < 0.5, `距離の測定 (${dist && measureValue(dist).text}, 期待 ${expectMm.toFixed(1)} mm)`);
+  // 距離の数値をつかんで動かす：数値だけが動き、線の端点と値はそのまま。元に戻すと戻る
+  if (dist) {
+    setTool('select');
+    await sleep(50);
+    const lr = document.querySelector(`#pages [data-id="${dist.id}"] [data-mlabel] rect`)?.getBoundingClientRect();
+    const ptsBefore = JSON.stringify(dist.points), valBefore = measureValue(dist).text;
+    if (lr) await mouseDrag(lr.left + lr.width / 2, lr.top + lr.height / 2, lr.left + lr.width / 2 + 40, lr.top + lr.height / 2 + 30);
+    await sleep(100);
+    const moved = ms().find((o) => o.id === dist.id);
+    const off = moved?.labelOffset;
+    // 画面で右に 40・下に 30 動かした → PDF 座標では右・上下逆（倍率で割る）
+    const okMove = lr && off && Math.abs(off[0] - 40 / view.scale) < 2 && Math.abs(Math.abs(off[1]) - 30 / view.scale) < 2;
+    check(okMove && JSON.stringify(moved.points) === ptsBefore && measureValue(moved).text === valBefore,
+      `距離の測定：数値をつかんで動かせる（線と値はそのまま） (ずれ ${off ? off.map((v) => v.toFixed(1)).join(', ') : 'なし'}, 値 ${moved && measureValue(moved).text})`);
+    undo();
+    await sleep(100);
+    const back = ms().find((o) => o.id === dist.id);
+    check(back && !(back.labelOffset && (back.labelOffset[0] || back.labelOffset[1])), `距離の測定：数値の移動を元に戻せる (${JSON.stringify(back?.labelOffset)})`);
+    redo();
+    await sleep(100);
+  }
   // 面積：3 点クリックして Enter
   setTool('measureArea');
   const pA = at(0, 0.2, 0.5), pB = at(0, 0.5, 0.5), pC = at(0, 0.5, 0.8);
@@ -314,6 +344,16 @@ async function measureTests() {
   await sleep(150);
   const per = ms().find((o) => o.kind === 'perimeter');
   check(per && per.points.length === 3, `周長の測定（Backspace で頂点を取り消し） (頂点 ${per?.points.length})`);
+  // ダブルクリックで確定する（最後の点はダブルクリックした位置。点は増えすぎない）
+  for (const [tool, kind, pts] of [['measurePerim', 'perimeter', [[0.15, 0.85], [0.3, 0.85]]], ['measureArea', 'area', [[0.4, 0.85], [0.55, 0.85]]]]) {
+    setTool(tool);
+    const before = ms().filter((o) => o.kind === kind).length;
+    for (const f of pts) await click(...at(0, ...f));
+    await dblclick(...at(0, pts[1][0] + 0.05, 0.95));
+    const list = ms().filter((o) => o.kind === kind);
+    check(list.length === before + 1 && list[list.length - 1].points.length === 3 && !polyActive(),
+      `${kind === 'area' ? '面積' : '周長'}の測定：ダブルクリックで確定する (件数 ${before} → ${list.length}, 頂点 ${list[list.length - 1]?.points.length}, 入力中 ${polyActive()})`);
+  }
   await shot('13_measure');
   // 縮尺 1:100（m）を既存の測定にも適用
   answer({ preset: '100', unit: 'm', decimals: 2, all: true });
@@ -354,7 +394,10 @@ async function measureTests() {
   check(measures.length >= 4, `測定の縮尺情報 (/Measure) を書き出す (${measures.length} 件)`);
   await openBytes(out, { name: 'measure2.pdf', askPassword: async () => null });
   await ready();
-  check(ms().length === 4 && ms().some((o) => o.kind === 'area'), '開き直しても測定を編集できる');
+  // 距離・面積・周長（Backspace）・キャリブレーションの 4 件と、ダブルクリックで確定した周長・面積の 2 件
+  check(ms().length === 6 && ms().some((o) => o.kind === 'area'), `開き直しても測定を編集できる (${ms().length} 件)`);
+  const kept = ms().find((o) => o.kind === 'distance' && Array.isArray(o.labelOffset));
+  check(kept && Math.hypot(...kept.labelOffset) > 5, `開き直しても、動かした数値の位置が残る (${JSON.stringify(kept?.labelOffset?.map((v) => +v.toFixed(1)))})`);
 }
 
 async function tiffTests() {
@@ -2082,6 +2125,7 @@ export async function run() {
     await uiTests();
     const only = new URLSearchParams(location.search).get('only');
     if (only === 'tabs') { await tabTests(); throw new Error('__only__'); }
+    if (only === 'measure') { await measureTests(); throw new Error('__only__'); }
     if (only === 'sharp') { await sharpTests(); throw new Error('__only__'); }
     if (only === 'scan') { await scanFastTests(); throw new Error('__only__'); }
     if (only === 'session') { await sessionTests(out); throw new Error('__only__'); }

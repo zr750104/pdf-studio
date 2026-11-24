@@ -1146,7 +1146,8 @@ function drawMeasure(g, o) {
   g.append(svg('path', { d, fill: o.kind === 'area' ? 'transparent' : 'none', stroke: 'transparent', 'stroke-width': sw + 8 / view.scale }));
   const L = measureLabel(o);
   const fs = MEASURE_LABEL_SIZE;
-  const lg = svg('g', { transform: `rotate(${L.angle} ${L.cx} ${L.cy})` });
+  // 距離の数値は、選択ツールでつかんで動かせる（data-mlabel）
+  const lg = svg('g', { transform: `rotate(${L.angle} ${L.cx} ${L.cy})`, ...(o.kind === 'distance' ? { class: 'mlabel', 'data-mlabel': '1' } : {}) });
   lg.append(svg('rect', { x: L.cx - L.w / 2, y: L.cy - L.h / 2, width: L.w, height: L.h, fill: '#ffffff', 'fill-opacity': 0.92 }));
   const t = svg('text', { transform: `matrix(1 0 0 -1 ${L.cx} ${L.cy - fs * 0.35})`, 'font-size': fs, fill: o.color, 'font-family': 'Noto Sans JP', 'text-anchor': 'middle' });
   t.textContent = L.text;
@@ -1337,6 +1338,17 @@ async function onPointerDown(i, ev) {
       startDrag(ev, { kind: 'vertex', page: i, gesture: g, k: +target.dataset.vertex, changed: false });
       return;
     }
+    // 距離の測定の数値をつかんだら、数値だけを動かす（線と端点はそのまま）
+    const labelOf = target.closest?.('[data-mlabel]')?.closest('.obj')?.dataset.id;
+    if (labelOf && can('annotate')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (view.selected !== labelOf) select(labelOf);
+      const g = beginGesture(labelOf);
+      const o = g?.obj;
+      if (o) startDrag(ev, { kind: 'label', page: i, gesture: g, start: pt, orig: Array.isArray(o.labelOffset) ? [...o.labelOffset] : [0, 0], changed: false });
+      return;
+    }
     if (corner && sel) {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1379,8 +1391,13 @@ async function onPointerDown(i, ev) {
   if (t === 'signature') { const src = await chooseSignature(); if (src) placeImage(i, pt, src, 150, '署名'); return; }
   if (POLY_TOOLS.has(t)) {
     ev.preventDefault();
-    // ダブルクリックの 2 回目は点を足さずに確定する
-    if (ev.detail >= 2 && poly?.page === i) { finishPoly(); return; }
+    // ダブルクリックの 2 回目は点を足さずに確定する。
+    // pointerdown の detail（連続クリックの回数）は、この版の Chromium では 0 のことがあるので当てにせず、
+    // 前に押した時刻と位置から自分で見分ける（0.5 秒以内に、ほぼ同じ場所＝6 画素以内）
+    const now = performance.now();
+    const quick = lastPolyDown && now - lastPolyDown.t < 500 && Math.hypot(ev.clientX - lastPolyDown.x, ev.clientY - lastPolyDown.y) <= 6;
+    lastPolyDown = { t: now, x: ev.clientX, y: ev.clientY };
+    if ((ev.detail >= 2 || quick) && poly?.page === i) { lastPolyDown = null; finishPoly(); return; }
     if (!poly || poly.page !== i) { cancelPoly(); poly = { page: i, kind: t === 'measureArea' ? 'area' : 'perimeter', points: [] }; }
     const q = polySnap(pt, ev.shiftKey);
     poly.points.push(q);
@@ -1396,6 +1413,7 @@ async function onPointerDown(i, ev) {
 // ---------------------------------------------------------------- 測定
 
 let poly = null;  // 入力中の折れ線・多角形 { page, kind, points }
+let lastPolyDown = null; // 周長・面積で最後にマウスを押した時刻と位置（ダブルクリックを見分ける）
 
 /** 文書の縮尺 */
 export const currentScale = () => state.measureScale || DEFAULT_SCALE;
@@ -1613,6 +1631,15 @@ function onDragMove(ev) {
       const [a, b, c, d] = p.vp1.transform;
       drag.sel.setAttribute('transform', `translate(${a * drag.dx + c * drag.dy} ${b * drag.dx + d * drag.dy})`);
     }
+  } else if (drag.kind === 'label') {
+    const o = drag.gesture?.obj;
+    if (!o) return;
+    o.labelOffset = [drag.orig[0] + pt[0] - drag.start[0], drag.orig[1] + pt[1] - drag.start[1]];
+    o.rect = objBounds(o);
+    drag.changed = true;
+    const old = p.objGroup?.querySelector(`[data-id="${o.id}"]`);
+    if (old) old.replaceWith(drawShape(o));
+    p.overlay.querySelector('.selection')?.replaceWith(selectionGroup(p, o));
   } else if (drag.kind === 'vertex') {
     const o = drag.gesture?.obj;
     if (!o) return;
@@ -1716,7 +1743,7 @@ async function onDragEnd(ev) {
     if (moved) emit('selection-changed', view.selected);
     return;
   }
-  if (d.kind === 'resize' || d.kind === 'vertex') {
+  if (d.kind === 'resize' || d.kind === 'vertex' || d.kind === 'label') {
     if (d.kind === 'vertex' && d.changed) {
       const o = d.gesture.obj;
       o.contents = `${measureValue(o).label}: ${measureValue(o).text}`;

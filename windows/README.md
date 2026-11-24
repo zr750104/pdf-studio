@@ -40,6 +40,11 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.31 の変更点
+
+- 周長・面積の測定のダブルクリックでの確定（viewer.js onPointerDown）：pointerdown の detail はこの版の Chromium では 0 のことがあり確定できなかった。前に押した時刻と位置（0.5 秒以内・6 画素以内、lastPolyDown）で見分け、2 回目は点を足さずに確定する
+- 距離の測定の数値を、選択ツールでつかんで動かせる（drawMeasure の data-mlabel、ドラッグ kind 'label'）。動かした量は o.labelOffset（PDF 座標のずれ）で持ち、measureLabel が足す。cloneObject・rotateObjectBy（向きだけ回す）・scaleObject（倍率を掛ける）でも扱う。保存した見た目と開き直したデータにも残る。周長・面積の数値は動かさない
+
 ## 1.5.30 の変更点
 
 - 位置合わせ（overlay.js findShift）：粗い段の山を「その位置から右・下の 2×2 の合計」で比べ、その中でいちばん高い位置を候補にする（正しいずれが粗い画素の境目にかかって点数が半分ずつに割れ、格子の 1 本ずれた位置に負けていた）。7 割の足切りをやめ、候補は 8 か所。格子＋短い線の試験で 75/90 → 90/90。小さな画像（大きい辺が 200 画素以下で段が 1 つ）のときは、その位置そのものの点数で選ぶ
