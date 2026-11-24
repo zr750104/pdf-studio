@@ -398,6 +398,21 @@ async function measureTests() {
   check(ms().length === 6 && ms().some((o) => o.kind === 'area'), `開き直しても測定を編集できる (${ms().length} 件)`);
   const kept = ms().find((o) => o.kind === 'distance' && Array.isArray(o.labelOffset));
   check(kept && Math.hypot(...kept.labelOffset) > 5, `開き直しても、動かした数値の位置が残る (${JSON.stringify(kept?.labelOffset?.map((v) => +v.toFixed(1)))})`);
+  // 開き直したあとも、選択・手のひら（最初の道具）・測定ツールのどれでも数値をつかんで動かせる（測定は増えない）
+  for (const tool of ['select', 'hand', 'measureDist']) {
+    if (!kept) break;
+    setTool(tool);
+    await sleep(100);
+    const before = ms().find((o) => o.id === kept.id)?.labelOffset?.slice(), n0 = ms().length;
+    const lr = document.querySelector(`#pages [data-id="${kept.id}"] [data-mlabel] rect`)?.getBoundingClientRect();
+    if (lr) await mouseDrag(lr.left + lr.width / 2, lr.top + lr.height / 2, lr.left + lr.width / 2 + 30, lr.top + lr.height / 2 + 20);
+    await sleep(150);
+    const after = ms().find((o) => o.id === kept.id)?.labelOffset;
+    const moved = before && after && Math.abs(after[0] - before[0] - 30 / view.scale) < 2;
+    const selOk = tool === 'select' ? view.selected === kept.id : !view.selected;
+    check(lr && moved && ms().length === n0 && selOk, `開き直したあと、${tool} で数値を動かせる（選択ツール以外では選択を残さない） (選択 ${view.selected ? 'あり' : 'なし'}, ずれ ${after ? after.map((v) => v.toFixed(1)).join(', ') : 'なし'}, 件数 ${n0}→${ms().length})`);
+  }
+  setTool('select');
 }
 
 async function tiffTests() {

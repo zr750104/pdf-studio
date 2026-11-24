@@ -40,6 +40,10 @@ Adobe Acrobat Pro の主要機能を備えた Windows 用 PDF エディタです
 
 新しい版の公開（開発者向け）: `package.json` の version を上げ、`release-notes.md` を書いてから `scripts/release.sh` を実行します（事前に `gh auth login`）。
 
+## 1.5.32 の変更点
+
+- 距離の測定の数値を、手のひら・測定ツールでもつかんで動かせる（viewer.js LABEL_TOOLS、onPointerDown の先頭で判定。周長・面積の入力中と縮尺合わせの途中は除く。styles.css で .mlabel だけ pointer-events を戻す）。選択ツール以外で動かしたときは、終わったら選択を外す（矢印キー・Delete が測定に効かないように）。手のひらの画面移動は stopPropagation してページ側と二重に始めない
+
 ## 1.5.31 の変更点
 
 - 周長・面積の測定のダブルクリックでの確定（viewer.js onPointerDown）：pointerdown の detail はこの版の Chromium では 0 のことがあり確定できなかった。前に押した時刻と位置（0.5 秒以内・6 画素以内、lastPolyDown）で見分け、2 回目は点を足さずに確定する

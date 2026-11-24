@@ -50,6 +50,8 @@ export const TOOL_GROUPS = [['select', 'hand'], ['highlight', 'underline', 'stri
   ['image', 'signature', 'stamp'], ['measureDist', 'measurePerim', 'measureArea'], ['redact', 'crop', 'link'], ['formText', 'formCheck', 'formChoice'], ['eraser']];
 const DRAG_TOOLS = new Set(['text', 'ink', 'rect', 'ellipse', 'line', 'arrow', 'measureDist', 'redact', 'crop', 'link', 'formText', 'formCheck', 'formChoice']);
 const POLY_TOOLS = new Set(['measurePerim', 'measureArea']);
+// 距離の数値をつかんで動かせる道具
+const LABEL_TOOLS = new Set(['select', 'hand', 'measureDist', 'measurePerim', 'measureArea']);
 const MARKUP = new Set(['highlight', 'underline', 'strike']);
 
 /** キャンバス 1 枚あたりの最大画素数（これを超える倍率では解像度を落として描く） */
@@ -1146,7 +1148,7 @@ function drawMeasure(g, o) {
   g.append(svg('path', { d, fill: o.kind === 'area' ? 'transparent' : 'none', stroke: 'transparent', 'stroke-width': sw + 8 / view.scale }));
   const L = measureLabel(o);
   const fs = MEASURE_LABEL_SIZE;
-  // 距離の数値は、選択ツールでつかんで動かせる（data-mlabel）
+  // 距離の数値は、選択・手のひら・測定ツールでつかんで動かせる（data-mlabel、LABEL_TOOLS）
   const lg = svg('g', { transform: `rotate(${L.angle} ${L.cx} ${L.cy})`, ...(o.kind === 'distance' ? { class: 'mlabel', 'data-mlabel': '1' } : {}) });
   lg.append(svg('rect', { x: L.cx - L.w / 2, y: L.cy - L.h / 2, width: L.w, height: L.h, fill: '#ffffff', 'fill-opacity': 0.92 }));
   const t = svg('text', { transform: `matrix(1 0 0 -1 ${L.cx} ${L.cy - fs * 0.35})`, 'font-size': fs, fill: o.color, 'font-family': 'Noto Sans JP', 'text-anchor': 'middle' });
@@ -1328,6 +1330,21 @@ async function onPointerDown(i, ev) {
   const t = view.tool;
   const target = ev.target;
 
+  // 距離の測定の数値をつかんだら、数値だけを動かす（線と端点はそのまま）。
+  // 選択ツールのほか、手のひら（最初の道具）と測定ツールでも動かせる。
+  // ただし周長・面積を入力している途中と、縮尺合わせの途中は、いつもどおり点を打つ
+  const labelOf = LABEL_TOOLS.has(t) && !(poly && poly.page === i) && !view.calibrating
+    ? target.closest?.('[data-mlabel]')?.closest('.obj')?.dataset.id : null;
+  if (labelOf && can('annotate')) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (view.selected !== labelOf) select(labelOf);
+    const g = beginGesture(labelOf);
+    const o = g?.obj;
+    if (o) startDrag(ev, { kind: 'label', page: i, gesture: g, start: pt, orig: Array.isArray(o.labelOffset) ? [...o.labelOffset] : [0, 0], changed: false });
+    return;
+  }
+
   if (t === 'select') {
     const corner = target.dataset?.corner;
     const sel = selectedObject();
@@ -1336,17 +1353,6 @@ async function onPointerDown(i, ev) {
       ev.stopPropagation();
       const g = beginGesture(sel.obj.id);
       startDrag(ev, { kind: 'vertex', page: i, gesture: g, k: +target.dataset.vertex, changed: false });
-      return;
-    }
-    // 距離の測定の数値をつかんだら、数値だけを動かす（線と端点はそのまま）
-    const labelOf = target.closest?.('[data-mlabel]')?.closest('.obj')?.dataset.id;
-    if (labelOf && can('annotate')) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (view.selected !== labelOf) select(labelOf);
-      const g = beginGesture(labelOf);
-      const o = g?.obj;
-      if (o) startDrag(ev, { kind: 'label', page: i, gesture: g, start: pt, orig: Array.isArray(o.labelOffset) ? [...o.labelOffset] : [0, 0], changed: false });
       return;
     }
     if (corner && sel) {
@@ -1371,6 +1377,7 @@ async function onPointerDown(i, ev) {
   }
   if (t === 'hand') {
     ev.preventDefault();
+    ev.stopPropagation(); // ページ側でも画面移動が始まって二重にならないように
     document.body.classList.add('panning'); // ドラッグ中は「つかんだ手」のカーソルにする
     startDrag(ev, { kind: 'pan', x: ev.clientX, y: ev.clientY, sl: viewerEl.scrollLeft, st: viewerEl.scrollTop });
     return;
@@ -1749,6 +1756,9 @@ async function onDragEnd(ev) {
       o.contents = `${measureValue(o).label}: ${measureValue(o).text}`;
     }
     endGesture(d.gesture, d.changed);
+    // 手のひら・測定ツールで数値を動かしたときは、選択を残さない
+    // （残すと矢印キーで画面を動かすつもりが測定を動かし、Delete で消してしまう）
+    if (d.kind === 'label' && view.tool !== 'select') { select(null); return; }
     if (d.changed) emit('selection-changed', view.selected);
     else if (view.pages[d.page]?.mounted) drawOverlay(d.page);
     return;

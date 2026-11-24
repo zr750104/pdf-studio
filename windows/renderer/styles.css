@@ -218,6 +218,9 @@ body[data-tool=hand] .page { cursor: grab; }
 .overlay .obj { pointer-events: none; }
 .overlay.tool-select .obj, .overlay.tool-eraser .obj { pointer-events: visiblePainted; cursor: move; }
 .overlay.tool-eraser .obj { cursor: pointer; }
+/* 距離の数値は、手のひら・測定ツールでもつかんで動かせる（viewer.js LABEL_TOOLS） */
+.overlay.tool-hand .obj .mlabel, .overlay.tool-hand .obj .mlabel * { pointer-events: visiblePainted; cursor: move !important; }
+.overlay.tool-measureDist .obj .mlabel, .overlay.tool-measurePerim .obj .mlabel, .overlay.tool-measureArea .obj .mlabel { pointer-events: visiblePainted; cursor: move; }
 .overlay.tool-eraser .obj:hover { opacity: 0.5; }
 .overlay:not(.tool-select):not(.tool-eraser):not(.tool-highlight):not(.tool-underline):not(.tool-strike) .capture { pointer-events: all; cursor: crosshair; }
 .overlay.tool-hand .capture { cursor: grab; }
